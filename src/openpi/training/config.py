@@ -440,7 +440,6 @@ class TrainConfig:
 
     @property
     def trainable_filter(self) -> nnx.filterlib.Filter:
-        """Get the filter for the trainable parameters."""
         return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
 
     def __post_init__(self) -> None:
@@ -466,7 +465,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi0_fast_base/params"
         ),
-        batch_size=4,
+        batch_size=32,
         num_train_steps=30_000,
         freeze_filter=pi0_fast.Pi0FASTConfig(
             action_dim=7,
@@ -475,7 +474,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
         ).get_freeze_filter(),
         ema_decay=None,
-        wandb_enabled=False,
+        wandb_enabled=True,
     ),
 ]
 
