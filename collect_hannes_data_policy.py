@@ -29,7 +29,7 @@ policy = _websocket_client_policy.WebsocketClientPolicy(
 print("Connected to policy server, server metadata:", policy.get_server_metadata())
 
 
-MAX_STEPS = 200
+MAX_STEPS = 500
 
 env = suite.make(
     ENV_TASK,
@@ -126,6 +126,12 @@ for base_name, geom_names in _STICKY_OBJECT_SPECS:
     for gid in geom_ids:
         _STICKY_GEOM_TO_OBJECT[gid] = entry
 
+_MILK_OBJECT = None
+for obj in _STICKY_OBJECTS:
+    if obj["name"] == "milk":
+        _MILK_OBJECT = obj
+        break
+
 print("\nEnvironment created, ready to collect data (policy-controlled)...")
 
 
@@ -140,13 +146,12 @@ with h5py.File(save_path, "w") as f:
 
         obs = env.reset()
         free_joint_qpos_addr = env.sim.model.get_joint_qpos_addr("robot0_base_free")
-        current_qpos = env.sim.data.qpos[free_joint_qpos_addr[0] : free_joint_qpos_addr[0] + 7].copy()
-        current_qpos[2] = 1.2
-        env.sim.data.qpos[free_joint_qpos_addr[0] : free_joint_qpos_addr[0] + 7] = current_qpos
-        env.sim.forward()
-
-        target_position = np.array([0.125, 0.0, 1.0])
+        target_position = env.sim.data.qpos[free_joint_qpos_addr[0] : free_joint_qpos_addr[0] + 3].copy()
+        target_position[2] += 0.2
         target_quaternion = np.array([0.707, 0, 0, -0.707])
+        env.sim.data.qpos[free_joint_qpos_addr[0] : free_joint_qpos_addr[0] + 3] = target_position
+        env.sim.data.qpos[free_joint_qpos_addr[0] + 3 : free_joint_qpos_addr[0] + 7] = target_quaternion
+        env.sim.forward()
 
         episode_actions: list[np.ndarray] = []
         episode_states: list[dict[str, np.ndarray]] = []
@@ -160,12 +165,20 @@ with h5py.File(save_path, "w") as f:
 
         base_position = target_position.copy()
 
+        base_target_position = base_position.copy()
+        if _MILK_OBJECT is not None:
+            milk_qpos_start = _MILK_OBJECT["qpos_addr"][0]
+            milk_pos = env.sim.data.qpos[milk_qpos_start : milk_qpos_start + 3].copy()
+            # 期望最终位置：在 milk 前方一点
+            base_target_position[0] = milk_pos[0] + 0.2
+            base_target_position[1] = milk_pos[1]
+            base_target_position[2] = milk_pos[2]
+
         for obj in _STICKY_OBJECTS:
             obj["active"] = False
             obj["offset"] = np.zeros(3)
 
         done = False
-        print("Keyboard base control: w/s/a/d move in XY, q/e up/down, x to end episode, Enter to stay.", flush=True)
         while not done and step_count < MAX_STEPS:
             start_time = time.time()
 
@@ -193,37 +206,16 @@ with h5py.File(save_path, "w") as f:
             episode_sideview.append(obs["sideview_image"])
 
             obs, reward, done, info = env.step(action)
-
-            cmd = input("Base move (w/s/a/d/q/e, x=end episode, Enter=stay): ").strip().lower()
-            dx = dy = dz = 0.0
-            step_xy = 0.02
-            step_z = 0.02
-            for c in cmd:
-                if c == "w":
-                    dy += step_xy
-                elif c == "s":
-                    dy -= step_xy
-                elif c == "a":
-                    dx -= step_xy
-                elif c == "d":
-                    dx += step_xy
-                elif c == "q":
-                    dz += step_z
-                elif c == "e":
-                    dz -= step_z
-                elif c == "x":
-                    done = True
+            # 让基座从初始位置逐步朝 base_target_position 逼近（固定目标点），移动得更快一些
+            move_fraction = 0.05
+            target_position = (1 - move_fraction) * target_position + move_fraction * base_target_position
 
             free_joint_qpos_addr = env.sim.model.get_joint_qpos_addr("robot0_base_free")
             free_joint_qvel_addr = env.sim.model.get_joint_qvel_addr("robot0_base_free")
 
-            current_base_pos = env.sim.data.qpos[free_joint_qpos_addr[0] : free_joint_qpos_addr[0] + 3].copy()
-            target_position = current_base_pos + np.array([dx, dy, dz])
-
             env.sim.data.qpos[free_joint_qpos_addr[0] : free_joint_qpos_addr[0] + 3] = target_position
             env.sim.data.qpos[free_joint_qpos_addr[0] + 3 : free_joint_qpos_addr[0] + 7] = target_quaternion
             env.sim.data.qvel[free_joint_qvel_addr[0] : free_joint_qvel_addr[0] + 6] = 0.0
-            print(f"Base position set to: {target_position}", flush=True)
 
             if _STICKY_OBJECTS and _STICKY_PALM_SITE_ID is not None:
                 finger_mean = np.mean(action[2:]) if action.shape[0] >= 3 else 0.0

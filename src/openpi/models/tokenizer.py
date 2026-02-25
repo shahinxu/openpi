@@ -139,12 +139,6 @@ class FASTTokenizer:
         return self._paligemma_tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
 
 
-###########################################################################
-## The tokenizers below are used for RoboArena baseline implementations. ##
-## They are *not* used for pi0-style models.                             ##
-###########################################################################
-
-
 class BinningTokenizer:
     """
     Standard RT-2 / OpenVLA style binning tokenizer.

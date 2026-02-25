@@ -448,6 +448,7 @@ class TrainConfig:
 
 
 _CONFIGS = [
+    # PI0-FAST low-memory finetune for Hannes (discrete FAST action tokens).
     TrainConfig(
         name="pi0_fast_hannes_low_mem_finetune",
         model=pi0_fast.Pi0FASTConfig(
@@ -467,11 +468,48 @@ _CONFIGS = [
         ),
         batch_size=32,
         num_train_steps=30_000,
+        save_interval=50,
         freeze_filter=pi0_fast.Pi0FASTConfig(
             action_dim=7,
             action_horizon=10,
             max_token_len=180,
             paligemma_variant="gemma_2b_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        wandb_enabled=True,
+    ),
+    # PI0.5 continuous-action finetune for Hannes, initialized from pi0.5 base.
+    TrainConfig(
+        name="pi05_hannes_low_mem_finetune",
+        model=pi0_config.Pi0Config(
+            # Keep action_dim=32 to be shape-compatible with pi05_base weights.
+            # Hannes dataset actions (6D) will be padded up to 32 dims, and you can
+            # slice out the first few dims you actually use at inference time.
+            action_dim=32,
+            action_horizon=10,
+            # For pi0.5, max_token_len defaults to 200 when not set; we keep the default.
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            pi05=True,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="hannes/hannes_demo",
+            assets=AssetsConfig(assets_dir="./assets/pi05_hannes"),
+            base_config=DataConfig(prompt_from_task=False),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=32,
+        num_train_steps=30_000,
+        save_interval=50,
+        freeze_filter=pi0_config.Pi0Config(
+            action_dim=32,
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            pi05=True,
         ).get_freeze_filter(),
         ema_decay=None,
         wandb_enabled=True,

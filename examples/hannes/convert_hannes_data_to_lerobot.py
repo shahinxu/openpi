@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+import re
 import shutil
 from typing import Any, Dict, List, Optional
 
@@ -28,13 +29,9 @@ class HannesHDF5Layout:
 DEFAULT_LAYOUT = HannesHDF5Layout()
 
 def create_empty_dataset(repo_id: str, *, fps: int = 10) -> LeRobotDataset:
-
-    # Hannes data has 6‑dimensional actions and 512x512 RGB images. We
-    # store them at 256x256 in the dataset for consistency with other
-    # OpenPI examples.
     features: Dict[str, Any] = {
         "image": {
-            "dtype": "image",  # LeRobot expects this special dtype for images
+            "dtype": "image",
             "shape": (256, 256, 3),
             "names": ["height", "width", "channel"],
         },
@@ -43,8 +40,6 @@ def create_empty_dataset(repo_id: str, *, fps: int = 10) -> LeRobotDataset:
             "shape": (256, 256, 3),
             "names": ["height", "width", "channel"],
         },
-        # We don't have explicit robot state; keep a dummy 8‑D vector to
-        # stay compatible with Libero-style configs.
         "state": {
             "dtype": "float32",
             "shape": (8,),
@@ -98,7 +93,13 @@ def load_episode(
             else:
                 prompt = str(value)
         else:
-            prompt = ep_path.stem.replace("_", " ")
+            # Derive prompt from filename, e.g. "Hold the bottle_2.hdf5" -> "Hold the bottle".
+            stem = ep_path.stem
+            # Drop a trailing "_number" suffix if present.
+            m = re.match(r"^(.*)_\\d+$", stem)
+            if m:
+                stem = m.group(1)
+            prompt = stem.replace("_", " ")
 
     return {
         "state": None if state is None else np.asarray(state),
