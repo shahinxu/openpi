@@ -133,9 +133,8 @@ def populate_dataset(
     hdf5_files: List[Path],
     layout: HannesHDF5Layout = DEFAULT_LAYOUT,
 ) -> LeRobotDataset:
-    """Append all HDF5 episodes to the LeRobot dataset."""
 
-    from tqdm import tqdm  # local import to avoid hard dependency at import time
+    from tqdm import tqdm
     import cv2
 
     for ep_path in tqdm(hdf5_files, desc="Converting Hannes episodes"):
@@ -144,16 +143,13 @@ def populate_dataset(
         actions = episode["actions"]
         images = episode["images"]  # dict with keys like "image", "wrist_image"
         prompt = episode["prompt"]
-        # Determine episode length from actions.
         T = len(actions)
 
-        # Prepare state: if missing, use zeros.
         if states is None:
             states = np.zeros((T, 8), dtype=np.float32)
         else:
             states = states.astype(np.float32)
 
-        # Sanity checks on image lengths.
         for name, arr in images.items():
             if len(arr) != T:
                 raise ValueError(
