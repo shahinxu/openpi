@@ -67,6 +67,9 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        # Optional quantization regularizer on actions; when set to 0.0 this
+        # has no effect and the loss is the standard diffusion MSE.
+        self.action_quantization_weight = getattr(config, "action_quantization_weight", 0.0)
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -210,8 +213,38 @@ class Pi0(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        # Base diffusion loss on the denoising residual.
+        base_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        # Optional quantization regularizer that encourages the predicted clean
+        # actions to lie close to a small discrete set (e.g., {-1, 0, 1}). This
+        # is useful when the ground-truth actions are themselves discretized but
+        # the model prediction is continuous.
+        if self.action_quantization_weight > 0.0:
+            # Recover the predicted clean actions x_0 from the current noisy
+            # sample x_t and the model's prediction v_t of u_t = noise - actions.
+            # From x_t = t * noise + (1 - t) * actions and u_t = noise - actions,
+            # we get actions = x_t - t * u_t. We plug in v_t for u_t.
+            actions_pred = x_t - time_expanded * v_t
+
+            # Fixed discrete grid in action space. This matches common
+            # discretizations like {-1, 0, 1} and also covers binary {0, 1}
+            # dimensions by snapping them toward 0 or 1.
+            grid = jnp.array([-1.0, 0.0, 1.0], dtype=actions_pred.dtype)
+
+            # For each action dimension, compute the squared distance to the
+            # nearest grid element: min_k (a - grid_k)^2.
+            diff2 = jnp.square(actions_pred[..., None] - grid)
+            nearest_dist2 = jnp.min(diff2, axis=-1)
+
+            # Emphasize timesteps closer to the clean data (t -> 0), where the
+            # discrete structure matters more. time_expanded is shape *b,1,1.
+            weight_t = 1.0 - time_expanded
+            quant_loss = jnp.mean(weight_t * nearest_dist2, axis=-1)
+
+            return base_loss + self.action_quantization_weight * quant_loss
+
+        return base_loss
 
     @override
     def sample_actions(

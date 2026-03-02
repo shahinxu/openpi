@@ -79,8 +79,27 @@ def load_episode(
         if not layout.image_keys:
             raise ValueError("layout.image_keys is empty; please configure at least one camera key")
 
+        # Some Hannes episodes were collected with frontview+agentview cameras,
+        # newer policy episodes may have agentview+sideview instead. Detect
+        # which layout this file uses and map to the common keys
+        #   image        -> main view
+        #   wrist_image  -> secondary view
+        if all(path in f for path in layout.image_keys.values()):
+            image_key_map = layout.image_keys
+        elif "episode_0/agentview_images" in f and "episode_0/sideview_images" in f:
+            image_key_map = {
+                "image": "episode_0/agentview_images",
+                "wrist_image": "episode_0/sideview_images",
+            }
+        else:
+            available = list(f.keys())
+            raise ValueError(
+                f"Unsupported image layout in {ep_path}: expected frontview/agentview "
+                f"or agentview/sideview under 'episode_0', got top-level keys: {available}"
+            )
+
         images: Dict[str, np.ndarray] = {}
-        for name, path in layout.image_keys.items():
+        for name, path in image_key_map.items():
             images[name] = f[path][:]
         prompt: str
         if layout.prompt_key is not None and layout.prompt_key in f:

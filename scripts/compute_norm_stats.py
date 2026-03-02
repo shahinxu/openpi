@@ -39,12 +39,16 @@ def create_torch_dataloader(
     else:
         num_batches = len(dataset) // batch_size
         shuffle = False
+    # For norm-stats computation we don't need JAX sharding; use PyTorch
+    # mode so batches stay on a single host device and avoid sharding
+    # divisibility constraints.
     data_loader = _data_loader.TorchDataLoader(
         dataset,
         local_batch_size=batch_size,
         num_workers=num_workers,
         shuffle=shuffle,
         num_batches=num_batches,
+        framework="pytorch",
     )
     return data_loader, num_batches
 

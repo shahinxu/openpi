@@ -29,6 +29,10 @@ class Pi0Config(_model.BaseModelConfig):
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
+    # Optional extra loss to encourage actions to lie on a discrete grid
+    # (e.g., {-1, 0, 1} or {0, 1}). When set to 0.0, this regularizer is
+    # disabled and the loss reduces to the standard diffusion MSE.
+    action_quantization_weight: float = 0.0
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 

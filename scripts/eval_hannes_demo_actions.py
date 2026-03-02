@@ -1,11 +1,64 @@
 import argparse
 import os
+import time
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+import websockets.sync.client
 
-from openpi_client import websocket_client_policy as _websocket_client_policy
+from openpi_client import msgpack_numpy
+
+
+class _SimpleWebsocketClient:
+    """Minimal websocket client compatible with the OpenPI policy server.
+
+    This implementation disables websocket keepalive pings (ping_interval=None)
+    so that long JAX compilation on the server side does not trigger a
+    ConnectionClosedError due to ping timeouts during the first few inferences.
+    """
+
+    def __init__(self, host: str = "0.0.0.0", port: int | None = None):
+        if host.startswith("ws"):
+            uri = host
+        else:
+            uri = f"ws://{host}"
+        if port is not None:
+            uri += f":{port}"
+
+        self._packer = msgpack_numpy.Packer()
+        self._ws, self._metadata = self._wait_for_server(uri)
+
+    def _wait_for_server(self, uri: str):
+        while True:
+            try:
+                conn = websockets.sync.client.connect(
+                    uri,
+                    compression=None,
+                    max_size=None,
+                    ping_interval=None,
+                )
+                metadata = msgpack_numpy.unpackb(conn.recv())
+                return conn, metadata
+            except ConnectionRefusedError:
+                time.sleep(5)
+
+    def get_server_metadata(self) -> dict:
+        return self._metadata
+
+    def infer(self, obs: dict) -> dict:
+        data = self._packer.pack(obs)
+        self._ws.send(data)
+        response = self._ws.recv()
+        if isinstance(response, str):
+            raise RuntimeError(f"Error in inference server:\n{response}")
+        return msgpack_numpy.unpackb(response)
+
+    def close(self) -> None:
+        try:
+            self._ws.close()
+        except Exception:
+            pass
 
 
 def load_episode(hdf5_path: str, episode: int = 0):
@@ -88,7 +141,7 @@ def main():
     for start in range(0, T, chunk_size):
         end = min(start + chunk_size, T)
         print(f"Connecting to policy server at {args.host}:{args.port} for steps [{start}, {end}) ...")
-        policy = _websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
+        policy = _SimpleWebsocketClient(host=args.host, port=args.port)
         if first_connect:
             print("Connected. Server metadata:", policy.get_server_metadata())
             first_connect = False
