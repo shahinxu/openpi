@@ -14,7 +14,10 @@ import tyro
 
 @dataclasses.dataclass
 class HannesHDF5Layout:
-    state_key: Optional[str] = None
+    # Optional path to a low-dimensional state dataset inside the HDF5 file.
+    # For Hannes data that has been post-processed with backfill_states_from_actions.py,
+    # this is typically stored under "episode_0/states".
+    state_key: Optional[str] = "episode_0/states"
     action_key: str = "episode_0/actions"
 
     image_keys: Dict[str, str] = dataclasses.field(
@@ -71,11 +74,18 @@ def load_episode(
     layout: HannesHDF5Layout = DEFAULT_LAYOUT,
 ) -> Dict[str, np.ndarray]:
     with h5py.File(ep_path, "r") as f:
+        # Actions are required and use a possibly nested key like
+        # "episode_0/actions".
         actions = f[layout.action_key][:]
-        if layout.state_key is not None and layout.state_key in f:
-            state = f[layout.state_key][:]
-        else:
-            state = None
+
+        # State is optional. When a state_key is provided, try to read it;
+        # if the path does not exist, fall back to None.
+        state = None
+        if layout.state_key is not None:
+            try:
+                state = f[layout.state_key][:]
+            except KeyError:
+                state = None
         if not layout.image_keys:
             raise ValueError("layout.image_keys is empty; please configure at least one camera key")
 
@@ -146,9 +156,28 @@ def populate_dataset(
         T = len(actions)
 
         if states is None:
+            # No low-dimensional state available: fall back to zeros.
             states = np.zeros((T, 8), dtype=np.float32)
         else:
-            states = states.astype(np.float32)
+            states = np.asarray(states, dtype=np.float32)
+
+            # Ensure states has shape (T, D).
+            if states.ndim == 1:
+                states = states.reshape(T, -1)
+
+            if states.shape[0] != T:
+                raise ValueError(
+                    f"Mismatched lengths for states in {ep_path}: "
+                    f"len(actions)={T}, len(states)={states.shape[0]}"
+                )
+
+            # Pad or truncate to the 8-D state expected by the dataset spec.
+            if states.shape[1] < 8:
+                pad_dim = 8 - states.shape[1]
+                pad = np.zeros((T, pad_dim), dtype=np.float32)
+                states = np.concatenate([states, pad], axis=1)
+            elif states.shape[1] > 8:
+                states = states[:, :8]
 
         for name, arr in images.items():
             if len(arr) != T:

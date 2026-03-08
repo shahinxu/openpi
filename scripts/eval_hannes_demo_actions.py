@@ -11,13 +11,6 @@ from openpi_client import msgpack_numpy
 
 
 class _SimpleWebsocketClient:
-    """Minimal websocket client compatible with the OpenPI policy server.
-
-    This implementation disables websocket keepalive pings (ping_interval=None)
-    so that long JAX compilation on the server side does not trigger a
-    ConnectionClosedError due to ping timeouts during the first few inferences.
-    """
-
     def __init__(self, host: str = "0.0.0.0", port: int | None = None):
         if host.startswith("ws"):
             uri = host
@@ -68,10 +61,43 @@ def load_episode(hdf5_path: str, episode: int = 0):
             raise KeyError(f"Episode group {ep_key} not found in {hdf5_path}")
         g = f[ep_key]
         actions = np.asarray(g["actions"], dtype=np.float32)
-        front = np.asarray(g["frontview_images"], dtype=np.uint8)
-        agent = np.asarray(g["agentview_images"], dtype=np.uint8)
+        states = np.asarray(g["states"], dtype=np.float32) if "states" in g else None
+        # Support both original frontview+agentview layout and newer
+        # agentview+sideview layout used by auto-collected demos.
+        if "frontview_images" in g and "agentview_images" in g:
+            front = np.asarray(g["frontview_images"], dtype=np.uint8)
+            agent = np.asarray(g["agentview_images"], dtype=np.uint8)
+        elif "agentview_images" in g and "sideview_images" in g:
+            front = np.asarray(g["agentview_images"], dtype=np.uint8)
+            agent = np.asarray(g["sideview_images"], dtype=np.uint8)
+        else:
+            available = list(g.keys())
+            raise KeyError(
+                f"Unsupported image layout in {hdf5_path} under {ep_key}: "
+                f"expected frontview+agentview or agentview+sideview, got keys: {available}"
+            )
         task = g.attrs.get("task", None)
-    return actions, front, agent, task
+    return actions, states, front, agent, task
+
+
+def style_eval_plot():
+    plt.rcParams.update(
+        {
+            "figure.dpi": 160,
+            "savefig.dpi": 300,
+            "font.size": 13,
+            "axes.titlesize": 16,
+            "axes.labelsize": 14,
+            "axes.linewidth": 1.1,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": 12,
+            "legend.frameon": False,
+            "lines.linewidth": 2.2,
+            "grid.linewidth": 0.8,
+            "grid.alpha": 0.22,
+        }
+    )
 
 
 def main():
@@ -118,12 +144,24 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading demo from {args.hdf5}")
-    gt_actions, front_imgs, agent_imgs, task_attr = load_episode(args.hdf5, episode=0)
+    gt_actions, gt_states, front_imgs, agent_imgs, task_attr = load_episode(args.hdf5, episode=0)
 
     if args.max_steps is not None:
         T = min(args.max_steps, gt_actions.shape[0], front_imgs.shape[0], agent_imgs.shape[0])
     else:
         T = min(gt_actions.shape[0], front_imgs.shape[0], agent_imgs.shape[0])
+
+    if gt_states is not None:
+        T = min(T, gt_states.shape[0])
+        if gt_states.ndim == 1:
+            gt_states = gt_states.reshape(T, -1)
+        if gt_states.shape[1] < 8:
+            pad = np.zeros((gt_states.shape[0], 8 - gt_states.shape[1]), dtype=np.float32)
+            gt_states = np.concatenate([gt_states, pad], axis=1)
+        elif gt_states.shape[1] > 8:
+            gt_states = gt_states[:, :8]
+    else:
+        gt_states = np.zeros((T, 8), dtype=np.float32)
 
     # Decide prompt
     prompt = (
@@ -148,8 +186,7 @@ def main():
 
         for t in range(start, end):
             obs = {
-                # State was not used during training; we can safely feed zeros
-                "observation/state": np.zeros((8,), dtype=np.float32),
+                "observation/state": gt_states[t],
                 # Training used frontview as main image and agentview as wrist image
                 "observation/image": front_imgs[t],
                 "observation/wrist_image": agent_imgs[t],
@@ -180,23 +217,44 @@ def main():
 
     # Plot / save per-dimension trajectories: gt vs pred
     if not args.no_show or args.save_path is not None:
+        style_eval_plot()
         t_axis = np.arange(T)
-        dim_names = [f"dim{i}" for i in range(6)]
+        plot_dims = 3
+        dim_names = ["wrist_pitch", "wrist_yaw", "grip_mean"]
+        gt_color = "#1f4e79"
+        pred_color = "#c84c09"
 
-        fig, axes = plt.subplots(6, 1, figsize=(10, 12), sharex=True)
-        fig.suptitle(f"Actions GT vs Predicted on {os.path.basename(args.hdf5)}")
+        fig, axes = plt.subplots(plot_dims, 1, figsize=(11.5, 7.8), sharex=True)
+        fig.suptitle(
+            "Ground Truth vs Predicted Actions\n"
+            f"{os.path.basename(args.hdf5)} | mean L2={l2_per_step.mean():.4f}",
+            y=0.985,
+            fontweight="bold",
+        )
 
-        for i in range(6):
+        for i in range(plot_dims):
             ax = axes[i]
-            ax.plot(t_axis, gt_actions[:T, i], label="gt", linewidth=1.5)
-            ax.plot(t_axis, pred_actions[:, i], label="pred", linewidth=1.0, linestyle="--")
+            ax.plot(t_axis, gt_actions[:T, i], label="Ground truth", color=gt_color)
+            ax.plot(
+                t_axis,
+                pred_actions[:, i],
+                label="Prediction",
+                color=pred_color,
+                linestyle="--",
+                linewidth=2.0,
+            )
             ax.set_ylabel(dim_names[i])
-            ax.grid(True, alpha=0.3)
+            ax.set_ylim(-1.0, 1.0)
+            ax.set_xlim(0, max(T - 1, 1))
+            ax.grid(True)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
             if i == 0:
-                ax.legend(loc="upper right")
+                ax.legend(loc="upper right", ncol=2, handlelength=2.8)
 
-        axes[-1].set_xlabel("t (step)")
-        plt.tight_layout(rect=(0, 0, 1, 0.96))
+        axes[-1].set_xlabel("Time step")
+        fig.align_ylabels(axes)
+        plt.tight_layout(rect=(0.03, 0.03, 1, 0.95))
 
         if args.save_path is not None:
             out_path = args.save_path

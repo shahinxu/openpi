@@ -242,7 +242,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     def create(
         self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
     ) -> DataConfig:
-        prompt_source_key = "task" if self.repo_id == "hannes/hannes_demo" else "prompt"
+        prompt_source_key = "task" if self.repo_id.startswith("hannes/") else "prompt"
 
         repack_transform = _transforms.Group(
             inputs=[
@@ -498,6 +498,38 @@ _CONFIGS = [
             "gs://openpi-assets/checkpoints/pi05_base/params"
         ),
         # Must be divisible by the number of JAX devices (currently 7).
+        batch_size=35,
+        num_train_steps=30_000,
+        save_interval=1000,
+        freeze_filter=pi0_config.Pi0Config(
+            action_dim=32,
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            pi05=True,
+        ).get_freeze_filter(),
+        ema_decay=None,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="pi05_hannes_all",
+        model=pi0_config.Pi0Config(
+            action_dim=32,
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            pi05=True,
+            action_quantization_weight=0.1,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="hannes/hannes_all",
+            assets=AssetsConfig(assets_dir="./assets/pi05_hannes_all"),
+            base_config=DataConfig(prompt_from_task=False),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
         batch_size=35,
         num_train_steps=30_000,
         save_interval=1000,

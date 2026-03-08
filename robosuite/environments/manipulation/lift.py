@@ -308,14 +308,21 @@ class Lift(ManipulationEnv):
             tex_attrib=tex_attrib,
             mat_attrib=mat_attrib,
         )
-        # Create only a single bottle-like object (milk carton)
+        # Create all available lift objects: milk, can, bread, lemon, hammer.
+        # We keep `cube` as the primary object (milk) for rewards, but include
+        # the others in the scene so they can be used as targets by external
+        # controllers or scripts.
         self.milk = MilkObject(name="milk")
+        self.can = CanObject(name="can")
+        self.bread = BreadObject(name="bread")
+        self.lemon = LemonObject(name="lemon")
+        self.hammer = HammerObject(name="hammer")
 
-        # Use milk as the main (and only) graspable object
+        # Use milk as the main graspable object for the base Lift task logic.
         self.cube = self.milk
 
-        # Collect all objects (only the bottle)
-        all_objects = [self.milk]
+        # Collect all objects so they are spawned in the arena.
+        all_objects = [self.milk, self.can, self.bread, self.lemon, self.hammer]
 
         # Create placement initializer with all objects in grid layout
         if self.placement_initializer is not None:
