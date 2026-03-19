@@ -58,8 +58,8 @@ def create_empty_dataset(repo_id: str, *, fps: int = 10) -> LeRobotDataset:
         robot_type="hannes",
         fps=fps,
         features=features,
-        image_writer_threads=10,
-        image_writer_processes=5,
+        image_writer_threads=20,
+        image_writer_processes=10,
     )
 
 

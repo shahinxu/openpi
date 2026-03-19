@@ -1,6 +1,7 @@
 import dataclasses
 
 import jax
+import pytest
 
 from openpi.models import pi0_config
 from openpi.training import config as _config
@@ -15,6 +16,7 @@ def test_torch_data_loader():
         dataset,
         local_batch_size=4,
         num_batches=2,
+        framework="pytorch",
     )
     batches = list(loader)
 
@@ -27,7 +29,7 @@ def test_torch_data_loader_infinite():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 4)
 
-    loader = _data_loader.TorchDataLoader(dataset, local_batch_size=4)
+    loader = _data_loader.TorchDataLoader(dataset, local_batch_size=4, framework="pytorch")
     data_iter = iter(loader)
 
     for _ in range(10):
@@ -38,7 +40,13 @@ def test_torch_data_loader_parallel():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 10)
 
-    loader = _data_loader.TorchDataLoader(dataset, local_batch_size=4, num_batches=2, num_workers=2)
+    loader = _data_loader.TorchDataLoader(
+        dataset,
+        local_batch_size=4,
+        num_batches=2,
+        num_workers=2,
+        framework="pytorch",
+    )
     batches = list(loader)
 
     assert len(batches) == 2
@@ -48,7 +56,7 @@ def test_torch_data_loader_parallel():
 
 
 def test_with_fake_dataset():
-    config = _config.get_config("debug")
+    config = _config.TrainConfig(name="debug")
 
     loader = _data_loader.create_data_loader(config, skip_norm_stats=True, num_batches=2)
     batches = list(loader)
@@ -62,17 +70,21 @@ def test_with_fake_dataset():
         assert actions.shape == (config.batch_size, config.model.action_horizon, config.model.action_dim)
 
 
+@pytest.mark.manual
 def test_with_real_dataset():
-    config = _config.get_config("pi0_aloha_sim")
+    config = _config.get_config("pi05_hannes_all")
     config = dataclasses.replace(config, batch_size=4)
 
-    loader = _data_loader.create_data_loader(
-        config,
-        # Skip since we may not have the data available.
-        skip_norm_stats=True,
-        num_batches=2,
-        shuffle=True,
-    )
+    try:
+        loader = _data_loader.create_data_loader(
+            config,
+            skip_norm_stats=True,
+            num_batches=2,
+            shuffle=True,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        pytest.skip(f"Hannes dataset unavailable for manual test: {exc}")
+
     # Make sure that we can get the data config.
     assert loader.data_config().repo_id == config.data.repo_id
 

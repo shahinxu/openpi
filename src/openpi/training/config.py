@@ -4,7 +4,7 @@ import dataclasses
 import difflib
 import logging
 import pathlib
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -15,12 +15,9 @@ import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
-import openpi.policies.aloha_policy as aloha_policy
-import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
-import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -50,18 +47,9 @@ class DataConfig:
 
     prompt_from_task: bool = False
 
-    rlds_data_dir: str | None = None
-    action_space: droid_rlds_dataset.DroidActionSpace | None = None
-    datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
-
-
-class GroupFactory(Protocol):
-    def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
-        """Create a group."""
-
 
 @dataclasses.dataclass(frozen=True)
-class ModelTransformFactory(GroupFactory):
+class ModelTransformFactory:
     """Creates model transforms for standard pi0 models."""
 
     default_prompt: str | None = None
@@ -167,74 +155,7 @@ class FakeDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
-class SimpleDataConfig(DataConfigFactory):
-    data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(
-        default_factory=GroupFactory
-    )
-    model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(
-        default_factory=ModelTransformFactory
-    )
-
-    @override
-    def create(
-        self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
-    ) -> DataConfig:
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            data_transforms=self.data_transforms(model_config),
-            model_transforms=self.model_transforms(model_config),
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class LeRobotAlohaDataConfig(DataConfigFactory):
-    use_delta_joint_actions: bool = True
-    default_prompt: str | None = None
-    adapt_to_pi: bool = True
-
-    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
-        default=_transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "images": {"cam_high": "observation.images.top"},
-                        "state": "observation.state",
-                        "actions": "action",
-                    }
-                )
-            ]
-        )
-    )
-    action_sequence_keys: Sequence[str] = ("action",)
-
-    @override
-    def create(
-        self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
-    ) -> DataConfig:
-        data_transforms = _transforms.Group(
-            inputs=[aloha_policy.AlohaInputs(adapt_to_pi=self.adapt_to_pi)],
-            outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=self.adapt_to_pi)],
-        )
-        if self.use_delta_joint_actions:
-            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
-            data_transforms = data_transforms.push(
-                inputs=[_transforms.DeltaActions(delta_action_mask)],
-                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
-            )
-
-        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
-
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            repack_transforms=self.repack_transforms,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-            action_sequence_keys=self.action_sequence_keys,
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class LeRobotLiberoDataConfig(DataConfigFactory):
+class HannesDataConfig(DataConfigFactory):
 
     extra_delta_transform: bool = False
 
@@ -242,17 +163,14 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     def create(
         self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
     ) -> DataConfig:
-        prompt_source_key = "task" if self.repo_id.startswith("hannes/") else "prompt"
-
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
                     {
                         "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
                         "observation/state": "state",
                         "actions": "actions",
-                        "prompt": prompt_source_key,
+                        "prompt": "task",
                     }
                 )
             ]
@@ -268,105 +186,6 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
 
-        model_transforms = ModelTransformFactory()(model_config)
-
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            repack_transforms=repack_transform,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class RLDSDroidDataConfig(DataConfigFactory):
-    rlds_data_dir: str | None = None
-    action_space: droid_rlds_dataset.DroidActionSpace | None = None
-
-    datasets: Sequence[droid_rlds_dataset.RLDSDataset] = (
-        droid_rlds_dataset.RLDSDataset(
-            name="droid",
-            version="1.0.1",
-            weight=1.0,
-            filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
-        ),
-    )
-
-    @override
-    def create(
-        self,
-        assets_dirs: pathlib.Path,
-        model_config: _model.BaseModelConfig
-    ) -> DataConfig:
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/exterior_image_1_left": "observation/image",
-                        "observation/wrist_image_left": "observation/wrist_image",
-                        "observation/joint_position": "observation/joint_position",
-                        "observation/gripper_position": "observation/gripper_position",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
-                )
-            ]
-        )
-
-        data_transforms = _transforms.Group(
-            inputs=[droid_policy.DroidInputs(model_type=model_config.model_type)],
-            outputs=[droid_policy.DroidOutputs()],
-        )
-
-        if self.action_space == droid_rlds_dataset.DroidActionSpace.JOINT_POSITION:
-            delta_action_mask = _transforms.make_bool_mask(7, -1)
-            data_transforms = data_transforms.push(
-                inputs=[_transforms.DeltaActions(delta_action_mask)],
-                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
-            )
-
-        model_transforms = ModelTransformFactory()(model_config)
-
-        assert self.rlds_data_dir is not None, "Need to set rlds data dir for RLDS data loader."
-
-        return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
-            repack_transforms=repack_transform,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-            rlds_data_dir=self.rlds_data_dir,
-            action_space=self.action_space,
-            datasets=self.datasets,
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class LeRobotDROIDDataConfig(DataConfigFactory):
-    @override
-    def create(
-        self,
-        assets_dirs: pathlib.Path,
-        model_config: _model.BaseModelConfig
-    ) -> DataConfig:
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/exterior_image_1_left": "exterior_image_1_left",
-                        "observation/exterior_image_2_left": "exterior_image_2_left",
-                        "observation/wrist_image_left": "wrist_image_left",
-                        "observation/joint_position": "joint_position",
-                        "observation/gripper_position": "gripper_position",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
-                )
-            ]
-        )
-        data_transforms = _transforms.Group(
-            inputs=[droid_policy.DroidInputs(model_type=model_config.model_type)],
-            outputs=[droid_policy.DroidOutputs()],
-        )
         model_transforms = ModelTransformFactory()(model_config)
 
         return dataclasses.replace(
@@ -456,7 +275,7 @@ _CONFIGS = [
             max_token_len=180,
             paligemma_variant="gemma_2b_lora",
         ),
-        data=LeRobotLiberoDataConfig(
+        data=HannesDataConfig(
             repo_id="hannes/hannes_demo",
             assets=AssetsConfig(assets_dir="./assets/pi05_hannes"),
             base_config=DataConfig(prompt_from_task=False),
@@ -477,40 +296,6 @@ _CONFIGS = [
         ema_decay=None,
         wandb_enabled=True,
     ),
-    # PI0.5 continuous-action finetune for Hannes, initialized from pi0.5 base.
-    TrainConfig(
-        name="pi05_hannes_low_mem_finetune",
-        model=pi0_config.Pi0Config(
-            action_dim=32,
-            action_horizon=10,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            pi05=True,
-            action_quantization_weight=0.1,
-        ),
-        data=LeRobotLiberoDataConfig(
-            repo_id="hannes/hannes_demo",
-            assets=AssetsConfig(assets_dir="./assets/pi05_hannes"),
-            base_config=DataConfig(prompt_from_task=False),
-            extra_delta_transform=False,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
-        # Must be divisible by the number of JAX devices (currently 7).
-        batch_size=35,
-        num_train_steps=30_000,
-        save_interval=1000,
-        freeze_filter=pi0_config.Pi0Config(
-            action_dim=32,
-            action_horizon=10,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            pi05=True,
-        ).get_freeze_filter(),
-        ema_decay=None,
-        wandb_enabled=True,
-    ),
     TrainConfig(
         name="pi05_hannes_all",
         model=pi0_config.Pi0Config(
@@ -521,7 +306,7 @@ _CONFIGS = [
             pi05=True,
             action_quantization_weight=0.1,
         ),
-        data=LeRobotLiberoDataConfig(
+        data=HannesDataConfig(
             repo_id="hannes/hannes_all",
             assets=AssetsConfig(assets_dir="./assets/pi05_hannes_all"),
             base_config=DataConfig(prompt_from_task=False),
@@ -530,7 +315,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params"
         ),
-        batch_size=35,
+        batch_size=32,
         num_train_steps=30_000,
         save_interval=1000,
         freeze_filter=pi0_config.Pi0Config(

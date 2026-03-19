@@ -1,7 +1,15 @@
 import os
+import warnings
 
-import pynvml
 import pytest
+
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message="The pynvml package is deprecated.*",
+        category=FutureWarning,
+    )
+    import pynvml
 
 
 def set_jax_cpu_backend_if_no_gpu() -> None:
