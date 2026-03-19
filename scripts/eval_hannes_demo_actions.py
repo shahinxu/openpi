@@ -62,22 +62,24 @@ def load_episode(hdf5_path: str, episode: int = 0):
         g = f[ep_key]
         actions = np.asarray(g["actions"], dtype=np.float32)
         states = np.asarray(g["states"], dtype=np.float32) if "states" in g else None
-        # Support both original frontview+agentview layout and newer
-        # agentview+sideview layout used by auto-collected demos.
+        wrist = None
+        # Support legacy two-camera layouts and the current single-agentview layout.
         if "frontview_images" in g and "agentview_images" in g:
-            front = np.asarray(g["frontview_images"], dtype=np.uint8)
-            agent = np.asarray(g["agentview_images"], dtype=np.uint8)
+            image = np.asarray(g["frontview_images"], dtype=np.uint8)
+            wrist = np.asarray(g["agentview_images"], dtype=np.uint8)
         elif "agentview_images" in g and "sideview_images" in g:
-            front = np.asarray(g["agentview_images"], dtype=np.uint8)
-            agent = np.asarray(g["sideview_images"], dtype=np.uint8)
+            image = np.asarray(g["agentview_images"], dtype=np.uint8)
+            wrist = np.asarray(g["sideview_images"], dtype=np.uint8)
+        elif "agentview_images" in g:
+            image = np.asarray(g["agentview_images"], dtype=np.uint8)
         else:
             available = list(g.keys())
             raise KeyError(
                 f"Unsupported image layout in {hdf5_path} under {ep_key}: "
-                f"expected frontview+agentview or agentview+sideview, got keys: {available}"
+                f"expected frontview+agentview, agentview+sideview, or agentview-only, got keys: {available}"
             )
         task = g.attrs.get("task", None)
-    return actions, states, front, agent, task
+    return actions, states, image, wrist, task
 
 
 def style_eval_plot():
@@ -105,7 +107,7 @@ def main():
     parser.add_argument(
         "--hdf5",
         type=str,
-        default="hannes_demonstrations/Hold the milk carton_2.hdf5"
+        default="dataset_hannes_total/Hold the milk carton_002.hdf5"
     )
     parser.add_argument(
         "--host",
@@ -144,12 +146,15 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading demo from {args.hdf5}")
-    gt_actions, gt_states, front_imgs, agent_imgs, task_attr = load_episode(args.hdf5, episode=0)
+    gt_actions, gt_states, image_imgs, wrist_imgs, task_attr = load_episode(args.hdf5, episode=0)
 
     if args.max_steps is not None:
-        T = min(args.max_steps, gt_actions.shape[0], front_imgs.shape[0], agent_imgs.shape[0])
+        T = min(args.max_steps, gt_actions.shape[0], image_imgs.shape[0])
     else:
-        T = min(gt_actions.shape[0], front_imgs.shape[0], agent_imgs.shape[0])
+        T = min(gt_actions.shape[0], image_imgs.shape[0])
+
+    if wrist_imgs is not None:
+        T = min(T, wrist_imgs.shape[0])
 
     if gt_states is not None:
         T = min(T, gt_states.shape[0])
@@ -187,11 +192,11 @@ def main():
         for t in range(start, end):
             obs = {
                 "observation/state": gt_states[t],
-                # Training used frontview as main image and agentview as wrist image
-                "observation/image": front_imgs[t],
-                "observation/wrist_image": agent_imgs[t],
+                "observation/image": image_imgs[t],
                 "prompt": prompt,
             }
+            if wrist_imgs is not None:
+                obs["observation/wrist_image"] = wrist_imgs[t]
             out = policy.infer(obs)
             actions_seq = np.asarray(out["actions"], dtype=np.float32)
             pred = actions_seq[0, :6]
