@@ -22,8 +22,7 @@ class HannesHDF5Layout:
 
     image_keys: Dict[str, str] = dataclasses.field(
         default_factory=lambda: {
-            "image": "episode_0/frontview_images",
-            "wrist_image": "episode_0/agentview_images",
+            "image": "episode_0/agentview_images",
         }
     )
     prompt_key: Optional[str] = None
@@ -34,11 +33,6 @@ DEFAULT_LAYOUT = HannesHDF5Layout()
 def create_empty_dataset(repo_id: str, *, fps: int = 10) -> LeRobotDataset:
     features: Dict[str, Any] = {
         "image": {
-            "dtype": "image",
-            "shape": (256, 256, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "wrist_image": {
             "dtype": "image",
             "shape": (256, 256, 3),
             "names": ["height", "width", "channel"],
@@ -76,6 +70,8 @@ def load_episode(
     with h5py.File(ep_path, "r") as f:
         # Actions are required and use a possibly nested key like
         # "episode_0/actions".
+        if layout.action_key not in f:
+            raise KeyError(f"Missing required dataset {layout.action_key} in {ep_path}")
         actions = f[layout.action_key][:]
 
         # State is optional. When a state_key is provided, try to read it;
@@ -89,27 +85,16 @@ def load_episode(
         if not layout.image_keys:
             raise ValueError("layout.image_keys is empty; please configure at least one camera key")
 
-        # Some Hannes episodes were collected with frontview+agentview cameras,
-        # newer policy episodes may have agentview+sideview instead. Detect
-        # which layout this file uses and map to the common keys
-        #   image        -> main view
-        #   wrist_image  -> secondary view
-        if all(path in f for path in layout.image_keys.values()):
-            image_key_map = layout.image_keys
-        elif "episode_0/agentview_images" in f and "episode_0/sideview_images" in f:
-            image_key_map = {
-                "image": "episode_0/agentview_images",
-                "wrist_image": "episode_0/sideview_images",
-            }
-        else:
-            available = list(f.keys())
+        missing_image_keys = [path for path in layout.image_keys.values() if path not in f]
+        if missing_image_keys:
+            available_episode_keys = list(f["episode_0"].keys()) if "episode_0" in f else list(f.keys())
             raise ValueError(
-                f"Unsupported image layout in {ep_path}: expected frontview/agentview "
-                f"or agentview/sideview under 'episode_0', got top-level keys: {available}"
+                f"Missing required image datasets {missing_image_keys} in {ep_path}. "
+                f"Available keys: {available_episode_keys}"
             )
 
         images: Dict[str, np.ndarray] = {}
-        for name, path in image_key_map.items():
+        for name, path in layout.image_keys.items():
             images[name] = f[path][:]
         prompt: str
         if layout.prompt_key is not None and layout.prompt_key in f:
@@ -151,7 +136,7 @@ def populate_dataset(
         episode = load_episode(ep_path, layout=layout)
         states = episode["state"]
         actions = episode["actions"]
-        images = episode["images"]  # dict with keys like "image", "wrist_image"
+        images = episode["images"]
         prompt = episode["prompt"]
         T = len(actions)
 
@@ -191,13 +176,10 @@ def populate_dataset(
         for i in range(T):
             # Resize images to 256x256 to match feature spec.
             img = images["image"][i]
-            wrist = images["wrist_image"][i]
             img_resized = cv2.resize(img, (256, 256), interpolation=cv2.INTER_AREA)
-            wrist_resized = cv2.resize(wrist, (256, 256), interpolation=cv2.INTER_AREA)
 
             frame = {
                 "image": img_resized,
-                "wrist_image": wrist_resized,
                 "state": states[i],
                 "actions": actions[i],
                 # LeRobot convention: store language instruction under "task".
