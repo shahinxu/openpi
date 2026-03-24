@@ -702,6 +702,7 @@ def main():
     print("Connected to policy server, server metadata:", policy.get_server_metadata())
 
     object_names = list(valid_joints.keys())
+    lift_successes = []
 
     for ep in range(args.episodes):
         if args.target_object:
@@ -725,6 +726,9 @@ def main():
             base_speed=0.006,
             sticky_after_close=args.sticky_after_close,
         )
+        lift_success = int(ep_result.get("lift_success", 0))
+        lift_successes.append(lift_success)
+        print(f"Episode {ep}: target={chosen}, lift_success={lift_success}")
 
         agent_frames = ep_result["agent_frames"]
         video_path = os.path.join(
@@ -758,6 +762,13 @@ def main():
         print(f"Saved episode {ep} state plot: {state_plot_path}")
 
     env.close()
+
+    total_eps = len(lift_successes)
+    success_count = int(np.sum(lift_successes))
+    success_rate = (success_count / total_eps) if total_eps else 0.0
+    print("=== Summary ===")
+    print(f"Sticky mode: {args.sticky_after_close}")
+    print(f"Lift success: {success_count}/{total_eps} ({success_rate:.2%})")
 
     print("=== Done ===")
 
