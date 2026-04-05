@@ -116,148 +116,6 @@ def move_along_x_only(current, target_x, max_step):
     return next_pos, next_pos - current
 
 
-def build_human_like_approach_waypoints(
-    start_pos,
-    obj_pos,
-    front_sign,
-    front_clearance,
-    target_y_offset,
-    desired_z,
-    rng,
-):
-    # Human-like approach: detour -> curved swing -> backtrack -> overshoot -> settle.
-    target_y = float(obj_pos[1] + target_y_offset)
-    lateral_sign = 1.0 if float(start_pos[1]) <= target_y else -1.0
-
-    center = np.array(
-        [
-            float(obj_pos[0] + front_sign * (front_clearance + 0.16)),
-            target_y,
-            desired_z,
-        ],
-        dtype=np.float64,
-    )
-
-    pre_detour = np.array(
-        [
-            float(obj_pos[0] + front_sign * (front_clearance + 0.25)),
-            float(target_y + lateral_sign * rng.uniform(0.11, 0.18)),
-            desired_z,
-        ],
-        dtype=np.float64,
-    )
-
-    radius_x = float(rng.uniform(0.08, 0.14))
-    radius_y = float(rng.uniform(0.10, 0.17))
-    phase_shift = float(rng.uniform(-0.4, 0.4))
-    theta = np.linspace(0.0, 2.4 * np.pi, 9, endpoint=True) + phase_shift
-
-    waypoints = [pre_detour]
-    for a in theta:
-        p = center.copy()
-        p[0] += front_sign * radius_x * np.cos(a)
-        p[1] += lateral_sign * radius_y * np.sin(a)
-        p[0] = float(np.clip(p[0], 0.02, 0.32))
-        p[1] = float(np.clip(p[1], -0.20, 0.20))
-        waypoints.append(p)
-
-    # Explicit backtrack before re-entering and then a larger overshoot correction.
-    backtrack = np.array(
-        [
-            float(obj_pos[0] + front_sign * (front_clearance + 0.20)),
-            float(target_y + lateral_sign * rng.uniform(0.04, 0.10)),
-            desired_z,
-        ],
-        dtype=np.float64,
-    )
-    overshoot = np.array(
-        [
-            float(obj_pos[0] + front_sign * (front_clearance + 0.05)),
-            float(target_y - lateral_sign * rng.uniform(0.05, 0.10)),
-            desired_z,
-        ],
-        dtype=np.float64,
-    )
-    settle = np.array(
-        [
-            float(obj_pos[0] + front_sign * (front_clearance + 0.02)),
-            target_y,
-            desired_z,
-        ],
-        dtype=np.float64,
-    )
-    waypoints.extend([backtrack, overshoot, settle])
-    return waypoints
-
-
-def build_human_like_move_waypoints(start_pos, target_pos, rng):
-    """Build a visibly non-linear transfer path for the move phase.
-
-    Path shape: arc detour -> side swing -> overshoot -> settle target.
-    """
-    start = np.asarray(start_pos, dtype=np.float64)
-    target = np.asarray(target_pos, dtype=np.float64)
-    mid = 0.5 * (start + target)
-
-    vec_xy = target[:2] - start[:2]
-    dist_xy = float(np.linalg.norm(vec_xy))
-    if dist_xy < 1e-8:
-        return [target.copy()]
-
-    dir_xy = vec_xy / dist_xy
-    perp_xy = np.array([-dir_xy[1], dir_xy[0]], dtype=np.float64)
-
-    arc_scale = float(np.clip(0.28 * dist_xy, 0.05, 0.12))
-    swing_scale = float(np.clip(0.20 * dist_xy, 0.03, 0.09))
-    jitter_a = float(rng.uniform(0.85, 1.30))
-    jitter_b = float(rng.uniform(0.85, 1.25))
-    jitter_c = float(rng.uniform(0.80, 1.20))
-    perp_sign = 1.0 if rng.random() < 0.5 else -1.0
-
-    arc_detour = np.array(
-        [
-            float(mid[0] + perp_sign * perp_xy[0] * arc_scale * jitter_a),
-            float(mid[1] + perp_sign * perp_xy[1] * arc_scale * jitter_a),
-            float(mid[2] + rng.uniform(0.006, 0.022)),
-        ],
-        dtype=np.float64,
-    )
-    side_swing = np.array(
-        [
-            float(target[0] - 0.34 * vec_xy[0] - perp_sign * perp_xy[0] * swing_scale * jitter_b),
-            float(target[1] - 0.34 * vec_xy[1] - perp_sign * perp_xy[1] * swing_scale * jitter_b),
-            float(target[2] + rng.uniform(0.004, 0.018)),
-        ],
-        dtype=np.float64,
-    )
-    overshoot = np.array(
-        [
-            float(target[0] + 0.10 * vec_xy[0] + perp_sign * perp_xy[0] * 0.45 * swing_scale * jitter_c),
-            float(target[1] + 0.10 * vec_xy[1] + perp_sign * perp_xy[1] * 0.45 * swing_scale * jitter_c),
-            float(target[2]),
-        ],
-        dtype=np.float64,
-    )
-
-    # Occasionally insert an extra dogleg so move paths vary between episodes.
-    waypoints = [arc_detour, side_swing]
-    if rng.random() < 0.72:
-        dogleg = np.array(
-            [
-                float(target[0] - 0.18 * vec_xy[0] + perp_sign * perp_xy[0] * swing_scale * rng.uniform(0.45, 1.35)),
-                float(target[1] - 0.18 * vec_xy[1] + perp_sign * perp_xy[1] * swing_scale * rng.uniform(0.45, 1.35)),
-                float(target[2] + rng.uniform(0.002, 0.016)),
-            ],
-            dtype=np.float64,
-        )
-        waypoints.append(dogleg)
-    waypoints.extend([overshoot, target.copy()])
-    for p in waypoints:
-        p[0] = float(np.clip(p[0], 0.02, 0.32))
-        p[1] = float(np.clip(p[1], -0.20, 0.20))
-    return waypoints
-
-
 def is_object_in_contact(env, object_keyword):
     for i in range(env.sim.data.ncon):
         con = env.sim.data.contact[i]
@@ -380,7 +238,6 @@ def run_episode(
     pregrasp_clearance = 0.085
     grasp_clearance = 0.055
     target_y_offset = 0.02
-    humanized_approach_enabled = True
 
     actions = []
     states = []
@@ -430,7 +287,7 @@ def run_episode(
         raise RuntimeError("No valid reference object to place near. Provide --place-near-object.")
     active_move_total_steps = near_move_total_steps if near_target_joint is not None else move_total_steps
 
-    phase = "wander_approach" if humanized_approach_enabled else "align"
+    phase = "align"
     rotate_progress = 0
     forward_progress = 0
     forward_anchor_pos = None
@@ -445,10 +302,6 @@ def run_episode(
     lift_anchor_pos = None
     lift_target_pos = None
     move_target_pos = None
-    move_waypoints = None
-    move_waypoint_idx = 0
-    move_pause_steps_remaining = 0
-    move_replan_cooldown = 0
     lower_target_pos = None
     front_ready_count = 0
     rotate_anchor_pos = None
@@ -457,20 +310,6 @@ def run_episode(
     front_latched = False
     sticky_attached = False
     sticky_offset = np.zeros(3, dtype=np.float64)
-    wander_waypoints = build_human_like_approach_waypoints(
-        start_pos=base_pos,
-        obj_pos=obj_random,
-        front_sign=front_sign,
-        front_clearance=front_clearance,
-        target_y_offset=target_y_offset,
-        desired_z=desired_align_z,
-        rng=rng,
-    )
-    wander_idx = 0
-    wander_steps = 0
-    wander_max_steps = 280
-    wander_pause_steps_remaining = 0
-    align_pause_steps_remaining = 0
 
     for t in range(max_steps):
         # Hard-lock wrist pitch to its initial value for this episode.
@@ -543,35 +382,7 @@ def run_episode(
         else:
             front_latched = front_ready_enter
 
-        if phase == "wander_approach":
-            if wander_idx >= len(wander_waypoints):
-                phase = "align"
-                front_ready_count = 0
-                align_pause_steps_remaining = 0
-                target = front_target
-            else:
-                target = wander_waypoints[wander_idx].copy()
-                if robot_can_contact:
-                    phase = "align"
-                    front_ready_count = 0
-                    align_pause_steps_remaining = 0
-                    target = front_target
-                else:
-                    wander_steps += 1
-                    # Brief hesitation to mimic human corrections and uncertainty.
-                    if wander_pause_steps_remaining == 0 and rng.random() < 0.045:
-                        wander_pause_steps_remaining = int(rng.integers(2, 6))
-                    close_xy = np.linalg.norm(base_pos[:2] - target[:2]) <= 0.010
-                    close_xyz = np.linalg.norm(base_pos - target) <= 0.014
-                    if (close_xy or close_xyz) and wander_pause_steps_remaining == 0:
-                        wander_idx += 1
-                    if wander_pause_steps_remaining > 0:
-                        wander_pause_steps_remaining -= 1
-                    if wander_steps >= wander_max_steps:
-                        phase = "align"
-                        front_ready_count = 0
-
-        elif phase == "align":
+        if phase == "align":
             target = front_target
             if robot_can_contact or (not front_latched):
                 if front_sign > 0:
@@ -579,15 +390,8 @@ def run_episode(
                 else:
                     retreat_x = min(base_pos[0] - 0.015, obj_now[0] - front_enter_clearance - 0.03)
                 target = np.array([retreat_x, front_target[1], desired_align_z], dtype=np.float64)
-                align_pause_steps_remaining = 0
             else:
                 target = np.array([base_pos[0], front_target[1], desired_align_z], dtype=np.float64)
-                # Occasional short hesitations make the align motion less mechanical.
-                if align_pause_steps_remaining == 0 and rng.random() < 0.035:
-                    align_pause_steps_remaining = int(rng.integers(2, 5))
-                if align_pause_steps_remaining > 0:
-                    target = np.array([base_pos[0], base_pos[1], desired_align_z], dtype=np.float64)
-                    align_pause_steps_remaining -= 1
 
             if front_latched:
                 front_ready_count += 1
@@ -676,10 +480,6 @@ def run_episode(
                 side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
                 move_target_pos[0] = np.clip(float(near_obj_pos[0]), 0.02, 0.30)
                 move_target_pos[1] = np.clip(float(near_obj_pos[1] + side_sign * place_offset), -0.18, 0.18)
-                move_waypoints = build_human_like_move_waypoints(base_pos, move_target_pos, rng)
-                move_waypoint_idx = 0
-                move_pause_steps_remaining = 0
-                move_replan_cooldown = 0
 
         elif phase == "move":
             if move_target_pos is None:
@@ -688,45 +488,7 @@ def run_episode(
                 side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
                 move_target_pos[0] = np.clip(float(near_obj_pos[0]), 0.02, 0.30)
                 move_target_pos[1] = np.clip(float(near_obj_pos[1] + side_sign * place_offset), -0.18, 0.18)
-            if move_waypoints is None:
-                move_waypoints = build_human_like_move_waypoints(base_pos, move_target_pos, rng)
-                move_waypoint_idx = 0
-                move_pause_steps_remaining = 0
-                move_replan_cooldown = 0
-
-            # Low-probability online replanning creates visibly distinct runs.
-            if move_replan_cooldown <= 0 and rng.random() < 0.060:
-                move_waypoints = build_human_like_move_waypoints(base_pos, move_target_pos, rng)
-                move_waypoint_idx = 0
-                move_pause_steps_remaining = max(move_pause_steps_remaining, int(rng.integers(1, 4)))
-                move_replan_cooldown = int(rng.integers(8, 16))
-            else:
-                move_replan_cooldown = max(0, move_replan_cooldown - 1)
-
-            waypoint_target = move_waypoints[min(move_waypoint_idx, len(move_waypoints) - 1)]
-            target = waypoint_target.copy()
-
-            # Add tiny drifting noise while moving to avoid repeated geometric traces.
-            drift_amp = float(rng.uniform(0.0015, 0.0045))
-            target[0] += drift_amp * np.sin(0.29 * t + rng.uniform(-0.7, 0.7))
-            target[1] += drift_amp * np.cos(0.24 * t + rng.uniform(-0.7, 0.7))
-            target[0] = float(np.clip(target[0], 0.02, 0.32))
-            target[1] = float(np.clip(target[1], -0.20, 0.20))
-
-            # Small intermittent pauses make the transfer appear less robotic.
-            if move_pause_steps_remaining == 0 and rng.random() < 0.035:
-                move_pause_steps_remaining = int(rng.integers(2, 5))
-
-            close_xy = np.linalg.norm(base_pos[:2] - waypoint_target[:2]) <= 0.007
-            close_xyz = np.linalg.norm(base_pos - waypoint_target) <= 0.010
-            if (close_xy or close_xyz) and move_pause_steps_remaining == 0:
-                if move_waypoint_idx < len(move_waypoints) - 1:
-                    move_waypoint_idx += 1
-                target = move_waypoints[min(move_waypoint_idx, len(move_waypoints) - 1)].copy()
-
-            if move_pause_steps_remaining > 0:
-                move_pause_steps_remaining -= 1
-
+            target = move_target_pos.copy()
             move_progress += 1
             if np.linalg.norm(base_pos[:2] - move_target_pos[:2]) <= 0.003 or move_progress >= active_move_total_steps:
                 phase = "lower"
@@ -781,34 +543,13 @@ def run_episode(
             target = target.copy()
             target[2] -= min(0.03, 1.2 * z_err)
 
-        if phase in ("wander_approach", "align", "rotate", "forward", "grasp", "grasp_lock"):
+        if phase in ("align", "rotate", "forward", "grasp", "grasp_lock"):
             target = target.copy()
             target[2] = min(target[2], base_pos[2], desired_align_z)
-
-        if phase in ("wander_approach", "align", "rotate"):
-            # Add stronger low-frequency sway so the front-half path is visibly non-linear.
-            sway_amp = 0.010 if phase == "wander_approach" else 0.004
-            target = target.copy()
-            target[0] += sway_amp * np.sin(0.15 * t + 0.6) + 0.003 * np.sin(0.51 * t + 0.9)
-            target[1] += sway_amp * np.cos(0.11 * t + 1.1) + 0.004 * np.sin(0.37 * t + 0.2)
 
         step_speed = base_speed
         if phase == "forward":
             step_speed = forward_push_step_size
-        elif phase in ("wander_approach", "align", "rotate"):
-            # Stronger speed modulation plus occasional slowdowns for obvious variability.
-            speed_wave = 1.0 + 0.42 * np.sin(0.10 * t + 1.3) + 0.14 * np.sin(0.31 * t + 0.5)
-            step_speed = base_speed * float(np.clip(speed_wave, 0.48, 1.75))
-            if phase == "wander_approach":
-                step_speed *= 1.18
-            if phase in ("wander_approach", "align") and ((t % 17) in (0, 1)):
-                step_speed *= 0.45
-        elif phase == "move":
-            # Non-constant move speed to keep the transport phase visibly organic.
-            move_wave = 1.0 + 0.28 * np.sin(0.12 * t + 0.8) + 0.10 * np.sin(0.43 * t + 1.1)
-            step_speed = base_speed * float(np.clip(move_wave, 0.62, 1.45))
-            if rng.random() < 0.08:
-                step_speed *= float(rng.uniform(0.55, 1.45))
 
         if phase == "forward":
             next_base, base_delta = move_along_x_only(base_pos, forward_target_x, step_speed)
@@ -835,7 +576,6 @@ def run_episode(
             break
 
     obj_z_end = float(get_object_pos_from_joint(env, obj_joint)[2])
-    obj_pos_end = get_object_pos_from_joint(env, obj_joint)
     lifted = int((obj_z_end - obj_z_start) > 0.03)
 
     return {
@@ -850,8 +590,6 @@ def run_episode(
         "lift_success": lifted,
         "obj_z_start": obj_z_start,
         "obj_z_end": obj_z_end,
-        "obj_pos_start": np.asarray(obj_random, dtype=np.float32),
-        "obj_pos_end": np.asarray(obj_pos_end, dtype=np.float32),
         "agent_frames": np.asarray(agent_frames, dtype=np.uint8),
     }
 
@@ -958,53 +696,6 @@ def save_state_plot(states: np.ndarray, out_path: str, title: str) -> None:
     plt.close(fig)
 
 
-def save_base_trajectory_plot(
-    base_pos: np.ndarray,
-    obj_start_pos: np.ndarray,
-    obj_end_pos: np.ndarray,
-    out_path: str,
-    title: str,
-) -> None:
-    if base_pos.size == 0:
-        return
-
-    plt.rcParams.update(
-        {
-            "figure.dpi": 140,
-            "savefig.dpi": 220,
-            "font.size": 12,
-            "axes.labelsize": 12,
-            "axes.titlesize": 14,
-            "xtick.labelsize": 11,
-            "ytick.labelsize": 11,
-            "grid.alpha": 0.25,
-        }
-    )
-
-    fig, ax = plt.subplots(figsize=(7.6, 6.8))
-    ax.plot(base_pos[:, 0], base_pos[:, 1], color="#a63d40", linewidth=2.0, label="base_xy")
-    ax.scatter(base_pos[0, 0], base_pos[0, 1], c="#1f4e79", s=60, marker="o", label="start")
-    ax.scatter(base_pos[-1, 0], base_pos[-1, 1], c="#2f7d32", s=60, marker="X", label="end")
-    ax.scatter(float(obj_start_pos[0]), float(obj_start_pos[1]), c="#5b2a86", s=45, marker="s", label="obj_start")
-    ax.scatter(float(obj_end_pos[0]), float(obj_end_pos[1]), c="#ff9f1c", s=45, marker="D", label="obj_end")
-
-    ax.set_title(title, fontweight="bold")
-    ax.set_xlabel("Base X (m)")
-    ax.set_ylabel("Base Y (m)")
-    ax.grid(True)
-    ax.set_aspect("equal", adjustable="box")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(loc="best")
-
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    plt.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Hannes policy-driven test script with collected_data-style trajectories"
@@ -1039,7 +730,8 @@ def main():
         "--sticky-after-close",
         dest="sticky_after_close",
         action="store_true",
-        default=False
+        default=False,
+        help="Attach object to palm after close contact and release on opening.",
     )
     args = parser.parse_args()
 
@@ -1160,19 +852,6 @@ def main():
             title=f"States (First 3 dims) | {chosen}",
         )
         print(f"Saved episode {ep} state plot: {state_plot_path}")
-
-        base_traj_plot_path = os.path.join(
-            plot_dir,
-            f"hannes_{args.task}_policy_test_{timestamp}_ep{ep:02d}_base_xy_traj.png",
-        )
-        save_base_trajectory_plot(
-            base_pos=np.asarray(ep_result["base_pos"], dtype=np.float32),
-            obj_start_pos=np.asarray(ep_result["obj_pos_start"], dtype=np.float32),
-            obj_end_pos=np.asarray(ep_result["obj_pos_end"], dtype=np.float32),
-            out_path=base_traj_plot_path,
-            title=f"Base XY Trajectory | {chosen}",
-        )
-        print(f"Saved episode {ep} base-trajectory plot: {base_traj_plot_path}")
 
     env.close()
 

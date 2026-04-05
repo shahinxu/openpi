@@ -190,11 +190,9 @@ def run_episode(
     joints,
     policy,
     prompt,
-    max_steps=400,
+    max_steps=260,
     base_speed=0.006,
     sticky_after_close=False,
-    place_near_object=None,
-    place_offset=0.08,
 ):
     obs = env.reset()
 
@@ -265,27 +263,6 @@ def run_episode(
     palm_center_tol = 0.018
     grasp_total_steps = 45
     grasp_lock_steps = 16
-    lift_distance = float(rng.uniform(0.16, 0.21))
-    lift_total_steps = 26
-    move_total_steps = 32
-    near_move_total_steps = 56
-    lower_total_steps = 26
-    release_total_steps = 18
-
-    near_target_joint = None
-    near_target_name = None
-    if place_near_object and place_near_object in joints and place_near_object != chosen_obj:
-        near_target_joint = joints[place_near_object]
-        near_target_name = place_near_object
-    if near_target_joint is None:
-        for name in ("milk", "can", "hammer", "lemon", "bread"):
-            if name in joints and name != chosen_obj:
-                near_target_joint = joints[name]
-                near_target_name = name
-                break
-    if near_target_joint is None:
-        raise RuntimeError("No valid reference object to place near. Provide --place-near-object.")
-    active_move_total_steps = near_move_total_steps if near_target_joint is not None else move_total_steps
 
     phase = "align"
     rotate_progress = 0
@@ -295,14 +272,7 @@ def run_episode(
     prelift_y_target = None
     grasp_progress = 0
     grasp_lock_progress = 0
-    lift_progress = 0
-    move_progress = 0
-    lower_progress = 0
-    release_progress = 0
-    lift_anchor_pos = None
-    lift_target_pos = None
-    move_target_pos = None
-    lower_target_pos = None
+    hold_progress = 0
     front_ready_count = 0
     rotate_anchor_pos = None
     front_enter_clearance = front_clearance
@@ -458,65 +428,11 @@ def run_episode(
             target = np.array([base_pos[0], prelift_y_target, grasp_target[2]], dtype=np.float64)
             grasp_lock_progress += 1
             if grasp_lock_progress >= grasp_lock_steps:
-                phase = "lift"
-                lift_progress = 0
-                lift_anchor_pos = base_pos.copy()
-                lift_target_pos = lift_anchor_pos.copy()
-                lift_target_pos[2] = lift_anchor_pos[2] + lift_distance
-
-        elif phase == "lift":
-            if lift_anchor_pos is None:
-                lift_anchor_pos = base_pos.copy()
-            if lift_target_pos is None:
-                lift_target_pos = lift_anchor_pos.copy()
-                lift_target_pos[2] = lift_anchor_pos[2] + lift_distance
-            target = lift_target_pos.copy()
-            lift_progress += 1
-            if np.linalg.norm(base_pos - lift_target_pos) <= 0.003 or lift_progress >= lift_total_steps:
-                phase = "move"
-                move_progress = 0
-                move_target_pos = lift_target_pos.copy()
-                near_obj_pos = get_object_pos_from_joint(env, near_target_joint)
-                side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
-                move_target_pos[0] = np.clip(float(near_obj_pos[0]), 0.02, 0.30)
-                move_target_pos[1] = np.clip(float(near_obj_pos[1] + side_sign * place_offset), -0.18, 0.18)
-
-        elif phase == "move":
-            if move_target_pos is None:
-                move_target_pos = base_pos.copy()
-                near_obj_pos = get_object_pos_from_joint(env, near_target_joint)
-                side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
-                move_target_pos[0] = np.clip(float(near_obj_pos[0]), 0.02, 0.30)
-                move_target_pos[1] = np.clip(float(near_obj_pos[1] + side_sign * place_offset), -0.18, 0.18)
-            target = move_target_pos.copy()
-            move_progress += 1
-            if np.linalg.norm(base_pos[:2] - move_target_pos[:2]) <= 0.003 or move_progress >= active_move_total_steps:
-                phase = "lower"
-                lower_progress = 0
-                lower_target_pos = move_target_pos.copy()
-                if lift_anchor_pos is None:
-                    lift_anchor_pos = base_pos.copy()
-                lower_target_pos[2] = lift_anchor_pos[2]
-
-        elif phase == "lower":
-            if lower_target_pos is None:
-                lower_target_pos = base_pos.copy()
-                if lift_anchor_pos is not None:
-                    lower_target_pos[2] = lift_anchor_pos[2]
-            target = lower_target_pos.copy()
-            lower_progress += 1
-            if abs(base_pos[2] - lower_target_pos[2]) <= 0.003 or lower_progress >= lower_total_steps:
-                phase = "release"
-                release_progress = 0
-
-        elif phase == "release":
-            if lower_target_pos is None:
-                lower_target_pos = base_pos.copy()
-            target = lower_target_pos.copy()
-            release_progress += 1
+                phase = "hold"
 
         else:
             target = grasp_target
+            hold_progress += 1
 
         if chosen_obj in ("can", "milk"):
             obj_now_stable = get_object_pos_from_joint(env, obj_joint)
@@ -529,7 +445,7 @@ def run_episode(
                 finger_mean = float(np.mean(action[2:]))
                 if sticky_attached and finger_mean < -0.4:
                     sticky_attached = False
-                if (not sticky_attached) and phase in ("grasp_lock", "lift", "move", "lower"):
+                if (not sticky_attached) and phase in ("grasp_lock", "hold"):
                     near_palm = np.linalg.norm(obj_now_for_sticky - palm_pos) < 0.05
                     if robot_can_contact or near_palm:
                         sticky_offset = obj_now_for_sticky - palm_pos
@@ -572,7 +488,7 @@ def run_episode(
         rewards.append(float(reward))
         dones.append(bool(done))
 
-        if phase == "release" and release_progress >= release_total_steps:
+        if phase == "hold" and hold_progress >= 25:
             break
 
     obj_z_end = float(get_object_pos_from_joint(env, obj_joint)[2])
@@ -586,7 +502,6 @@ def run_episode(
         "base_pos": np.asarray(base_pos_seq, dtype=np.float32),
         "base_delta": np.asarray(base_delta_seq, dtype=np.float32),
         "chosen_object": chosen_obj,
-        "placed_near_object": near_target_name,
         "lift_success": lifted,
         "obj_z_start": obj_z_start,
         "obj_z_end": obj_z_end,
@@ -594,10 +509,18 @@ def run_episode(
     }
 
 
-def _prompt_for_place(target: str, near_obj: str | None) -> str:
-    if near_obj:
-        return f"place {target} near {near_obj}"
-    return f"place {target}"
+def _prompt_for_object(name: str) -> str:
+    if name == "can":
+        return "Grip the can"
+    if name == "milk":
+        return "Grip the milk"
+    if name == "bread":
+        return "Grip the bread"
+    if name == "lemon":
+        return "Grip the lemon"
+    if name == "hammer":
+        return "Grip the hammer"
+    return f"Hold the {name}"
 
 
 def save_predicted_action_plot(actions: np.ndarray, out_path: str, title: str) -> None:
@@ -705,7 +628,7 @@ def main():
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--control-freq", type=int, default=20)
-    parser.add_argument("--horizon", type=int, default=400)
+    parser.add_argument("--horizon", type=int, default=260)
     parser.add_argument(
         "--target-object",
         type=str,
@@ -714,18 +637,6 @@ def main():
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument(
-        "--place-near-object",
-        type=str,
-        default=None,
-        help="Optional reference object to place beside.",
-    )
-    parser.add_argument(
-        "--place-offset",
-        type=float,
-        default=0.08,
-        help="Side offset (meters) when placing near reference object.",
-    )
     parser.add_argument(
         "--sticky-after-close",
         dest="sticky_after_close",
@@ -791,7 +702,6 @@ def main():
     print("Connected to policy server, server metadata:", policy.get_server_metadata())
 
     object_names = list(valid_joints.keys())
-    lift_successes = []
 
     for ep in range(args.episodes):
         if args.target_object:
@@ -803,12 +713,7 @@ def main():
         else:
             chosen = object_names[ep % len(object_names)]
 
-        if args.place_near_object and args.place_near_object != chosen and args.place_near_object in valid_joints:
-            near_name = args.place_near_object
-        else:
-            near_name = next((n for n in ("bread", "lemon", "hammer", "milk", "can") if n in valid_joints and n != chosen), None)
-
-        prompt = _prompt_for_place(chosen, near_name)
+        prompt = _prompt_for_object(chosen)
         ep_result = run_episode(
             env,
             rng,
@@ -819,12 +724,7 @@ def main():
             max_steps=args.horizon,
             base_speed=0.006,
             sticky_after_close=args.sticky_after_close,
-            place_near_object=near_name,
-            place_offset=args.place_offset,
         )
-        lift_success = int(ep_result.get("lift_success", 0))
-        lift_successes.append(lift_success)
-        print(f"Episode {ep}: target={chosen}, near={near_name}, lift_success={lift_success}")
 
         agent_frames = ep_result["agent_frames"]
         video_path = os.path.join(
@@ -858,13 +758,6 @@ def main():
         print(f"Saved episode {ep} state plot: {state_plot_path}")
 
     env.close()
-
-    total_eps = len(lift_successes)
-    success_count = int(np.sum(lift_successes))
-    success_rate = (success_count / total_eps) if total_eps else 0.0
-    print("=== Summary ===")
-    print(f"Sticky mode: {args.sticky_after_close}")
-    print(f"Lift success: {success_count}/{total_eps} ({success_rate:.2%})")
 
     print("=== Done ===")
 

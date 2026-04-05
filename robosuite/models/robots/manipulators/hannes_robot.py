@@ -27,9 +27,14 @@ class Hannes(ManipulatorModel):
 
     @property
     def init_qpos(self):
-        return np.array([0.0, 0.0, 0.5,  # Position: floating at 0.5m height
-                        1.0, 0.0, 0.0, 0.0,  # Quaternion: no rotation
-                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # Hand joints: all at zero
+        return np.array([
+            0.0, 0.0, 0.5,  # base_free position
+            1.0, 0.0, 0.0, 0.0,  # base_free quaternion
+            0.0, 0.0, 0.0,  # arm translation: tx, ty, tz
+            0.0, 0.0, 0.0,  # arm rotation: rx, ry, rz
+            0.0, 0.0,  # wrist: pitch, yaw
+            0.0, 0.0, 0.0, 0.0,  # fingers: fore, mid, ring, little
+        ])
 
     @property
     def base_xpos_offset(self):

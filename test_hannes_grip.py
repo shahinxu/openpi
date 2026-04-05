@@ -8,8 +8,6 @@ import numpy as np
 import robosuite as suite
 import cv2
 
-from openpi_client import websocket_client_policy as _websocket_client_policy
-
 
 def set_base_pose(env, position, quaternion):
     qpos_addr = env.sim.model.get_joint_qpos_addr("robot0_base_free")
@@ -183,12 +181,29 @@ def set_joint_scalar(env, joint_name, value):
     env.sim.data.qvel[vel_addr] = 0.0
 
 
+def make_scripted_hand_action(phase, pitch_initial, grasp_progress, grasp_total_steps):
+    action = np.zeros((6,), dtype=np.float32)
+    action[0] = float(pitch_initial)
+    action[1] = 0.0
+
+    # Fingers: negative=open, positive=close.
+    if phase in ("align", "rotate", "forward"):
+        finger_cmd = -0.7
+    elif phase == "grasp":
+        ratio = min(1.0, grasp_progress / max(1, grasp_total_steps))
+        finger_cmd = -0.7 + 1.6 * ratio
+    else:
+        finger_cmd = 0.9
+
+    action[2:] = finger_cmd
+    return action
+
+
 def run_episode(
     env,
     rng,
     chosen_obj,
     joints,
-    policy,
     prompt,
     max_steps=260,
     base_speed=0.006,
@@ -302,16 +317,19 @@ def run_episode(
         policy_state = np.zeros((8,), dtype=np.float32)
         policy_state[: compact_state.shape[0]] = compact_state
 
-        libero_obs = {
+        _ = {
             "observation/state": policy_state,
             "observation/image": base_img,
             "observation/wrist_image": wrist_img,
             "prompt": prompt,
         }
 
-        out = policy.infer(libero_obs)
-        actions_seq = np.asarray(out["actions"], dtype=np.float32)
-        action = actions_seq[0, :6].copy()
+        action = make_scripted_hand_action(
+            phase=phase,
+            pitch_initial=pitch_initial,
+            grasp_progress=grasp_progress,
+            grasp_total_steps=grasp_total_steps,
+        )
 
         obj_now = get_object_pos_from_joint(env, obj_joint)
         target_y_now_align = float(obj_now[1] + target_y_offset)
@@ -484,7 +502,15 @@ def run_episode(
         base_pos_seq.append(base_pos.copy())
         base_delta_seq.append(base_delta.astype(np.float32))
 
-        obs, reward, done, _ = env.step(action)
+        env_action = np.zeros((env.action_dim,), dtype=np.float32)
+        # First 6 dims are hardcoded arm DoFs: tx, ty, tz, rx, ry, rz.
+        if env.action_dim >= 3:
+            env_action[:3] = np.asarray(base_delta, dtype=np.float32)
+        if env.action_dim >= 6:
+            env_action[3:6] = 0.0
+            env_action[-6:] = action
+
+        obs, reward, done, _ = env.step(env_action)
         rewards.append(float(reward))
         dones.append(bool(done))
 
@@ -635,8 +661,6 @@ def main():
         default="can",
         help="Fixed target object (default: can): one of milk, can, bread, lemon, hammer",
     )
-    parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--sticky-after-close",
         dest="sticky_after_close",
@@ -695,14 +719,9 @@ def main():
     print("Episodes:", args.episodes)
     print("Objects:", list(valid_joints.keys()))
 
-    policy = _websocket_client_policy.WebsocketClientPolicy(
-        host=args.host,
-        port=args.port,
-    )
-    print("Connected to policy server, server metadata:", policy.get_server_metadata())
+    print("Using scripted control mode (no policy server required).")
 
     object_names = list(valid_joints.keys())
-    lift_successes = []
 
     for ep in range(args.episodes):
         if args.target_object:
@@ -720,15 +739,11 @@ def main():
             rng,
             chosen,
             valid_joints,
-            policy=policy,
             prompt=prompt,
             max_steps=args.horizon,
             base_speed=0.006,
             sticky_after_close=args.sticky_after_close,
         )
-        lift_success = int(ep_result.get("lift_success", 0))
-        lift_successes.append(lift_success)
-        print(f"Episode {ep}: target={chosen}, lift_success={lift_success}")
 
         agent_frames = ep_result["agent_frames"]
         video_path = os.path.join(
@@ -762,13 +777,6 @@ def main():
         print(f"Saved episode {ep} state plot: {state_plot_path}")
 
     env.close()
-
-    total_eps = len(lift_successes)
-    success_count = int(np.sum(lift_successes))
-    success_rate = (success_count / total_eps) if total_eps else 0.0
-    print("=== Summary ===")
-    print(f"Sticky mode: {args.sticky_after_close}")
-    print(f"Lift success: {success_count}/{total_eps} ({success_rate:.2%})")
 
     print("=== Done ===")
 

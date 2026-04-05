@@ -19,13 +19,6 @@ def set_base_pose(env, position, quaternion):
     env.sim.data.qvel[qvel_addr[0] : qvel_addr[0] + 6] = 0.0
 
 
-def get_base_pose(env):
-    qpos_addr = env.sim.model.get_joint_qpos_addr("robot0_base_free")
-    pos = env.sim.data.qpos[qpos_addr[0] : qpos_addr[0] + 3].copy()
-    quat = env.sim.data.qpos[qpos_addr[0] + 3 : qpos_addr[0] + 7].copy()
-    return pos, quat
-
-
 def resolve_joint_name(env, joint_candidates):
     for joint_name in joint_candidates:
         try:
@@ -346,11 +339,6 @@ def run_episode(
     place_offset=0.08,
     reset_env=True,
     randomize_object_start=True,
-    continue_from_current_pose=False,
-    post_release_raise_height=0.10,
-    post_release_raise_steps=20,
-    initial_base_height_offset=0.22,
-    force_high_start_pose=False,
 ):
     if reset_env:
         obs = env.reset()
@@ -381,24 +369,16 @@ def run_episode(
     set_object_pos(env, obj_joint, obj_random, quat=obj_upright_quat)
 
     desired_align_z = float(obj_random[2] - 0.06)
-    if continue_from_current_pose and (not reset_env):
-        base_pos, base_quat = get_base_pose(env)
-        base_pos = np.asarray(base_pos, dtype=np.float64)
-        base_quat = np.asarray(base_quat, dtype=np.float64)
-        if force_high_start_pose:
-            min_start_z = float(obj_random[2] + initial_base_height_offset)
-            base_pos[2] = max(float(base_pos[2]), min_start_z)
-    else:
-        sampled_base_z = desired_align_z + rng.uniform(0.10, 0.42)
-        base_z_min = float(obj_random[2] + initial_base_height_offset)
-        base_pos = np.array(
-            [
-                obj_random[0] + rng.uniform(-0.35, 0.35),
-                obj_random[1] + rng.uniform(-0.35, 0.35),
-                max(sampled_base_z, base_z_min),
-            ],
-            dtype=np.float64,
-        )
+    sampled_base_z = desired_align_z + rng.uniform(-0.08, 0.25)
+    base_z_min = float(obj_random[2] + 0.12)
+    base_pos = np.array(
+        [
+            obj_random[0] + rng.uniform(-0.35, 0.35),
+            obj_random[1] + rng.uniform(-0.35, 0.35),
+            max(sampled_base_z, base_z_min),
+        ],
+        dtype=np.float64,
+    )
 
     set_base_pose(env, base_pos, base_quat)
     env.sim.forward()
@@ -472,7 +452,6 @@ def run_episode(
     move_progress = 0
     lower_progress = 0
     release_progress = 0
-    handoff_raise_progress = 0
     lift_anchor_pos = None
     lift_target_pos = None
     move_target_pos = None
@@ -481,7 +460,6 @@ def run_episode(
     move_pause_steps_remaining = 0
     move_replan_cooldown = 0
     lower_target_pos = None
-    handoff_target_pos = None
     front_ready_count = 0
     rotate_anchor_pos = None
     front_enter_clearance = front_clearance
@@ -587,10 +565,15 @@ def run_episode(
                     target = front_target
                 else:
                     wander_steps += 1
+                    # Brief hesitation to mimic human corrections and uncertainty.
+                    if wander_pause_steps_remaining == 0 and rng.random() < 0.045:
+                        wander_pause_steps_remaining = int(rng.integers(2, 6))
                     close_xy = np.linalg.norm(base_pos[:2] - target[:2]) <= 0.010
                     close_xyz = np.linalg.norm(base_pos - target) <= 0.014
-                    if close_xy or close_xyz:
+                    if (close_xy or close_xyz) and wander_pause_steps_remaining == 0:
                         wander_idx += 1
+                    if wander_pause_steps_remaining > 0:
+                        wander_pause_steps_remaining -= 1
                     if wander_steps >= wander_max_steps:
                         phase = "align"
                         front_ready_count = 0
@@ -711,15 +694,38 @@ def run_episode(
                 move_pause_steps_remaining = 0
                 move_replan_cooldown = 0
 
+            # Low-probability online replanning creates visibly distinct runs.
+            if move_replan_cooldown <= 0 and rng.random() < 0.060:
+                move_waypoints = build_human_like_move_waypoints(base_pos, move_target_pos, rng)
+                move_waypoint_idx = 0
+                move_pause_steps_remaining = max(move_pause_steps_remaining, int(rng.integers(1, 4)))
+                move_replan_cooldown = int(rng.integers(8, 16))
+            else:
+                move_replan_cooldown = max(0, move_replan_cooldown - 1)
+
             waypoint_target = move_waypoints[min(move_waypoint_idx, len(move_waypoints) - 1)]
             target = waypoint_target.copy()
 
+            # Add tiny drifting noise while moving to avoid repeated geometric traces.
+            drift_amp = float(rng.uniform(0.0015, 0.0045))
+            target[0] += drift_amp * np.sin(0.29 * t + rng.uniform(-0.7, 0.7))
+            target[1] += drift_amp * np.cos(0.24 * t + rng.uniform(-0.7, 0.7))
+            target[0] = float(np.clip(target[0], 0.02, 0.32))
+            target[1] = float(np.clip(target[1], -0.20, 0.20))
+
+            # Small intermittent pauses make the transfer appear less robotic.
+            if move_pause_steps_remaining == 0 and rng.random() < 0.035:
+                move_pause_steps_remaining = int(rng.integers(2, 5))
+
             close_xy = np.linalg.norm(base_pos[:2] - waypoint_target[:2]) <= 0.007
             close_xyz = np.linalg.norm(base_pos - waypoint_target) <= 0.010
-            if close_xy or close_xyz:
+            if (close_xy or close_xyz) and move_pause_steps_remaining == 0:
                 if move_waypoint_idx < len(move_waypoints) - 1:
                     move_waypoint_idx += 1
                 target = move_waypoints[min(move_waypoint_idx, len(move_waypoints) - 1)].copy()
+
+            if move_pause_steps_remaining > 0:
+                move_pause_steps_remaining -= 1
 
             move_progress += 1
             if np.linalg.norm(base_pos[:2] - move_target_pos[:2]) <= 0.003 or move_progress >= active_move_total_steps:
@@ -746,18 +752,6 @@ def run_episode(
                 lower_target_pos = base_pos.copy()
             target = lower_target_pos.copy()
             release_progress += 1
-            if release_progress >= release_total_steps:
-                phase = "handoff_raise"
-                handoff_raise_progress = 0
-                handoff_target_pos = target.copy()
-                handoff_target_pos[2] = float(handoff_target_pos[2] + max(0.0, post_release_raise_height))
-
-        elif phase == "handoff_raise":
-            if handoff_target_pos is None:
-                handoff_target_pos = base_pos.copy()
-                handoff_target_pos[2] = float(handoff_target_pos[2] + max(0.0, post_release_raise_height))
-            target = handoff_target_pos.copy()
-            handoff_raise_progress += 1
 
         else:
             target = grasp_target
@@ -791,9 +785,30 @@ def run_episode(
             target = target.copy()
             target[2] = min(target[2], base_pos[2], desired_align_z)
 
+        if phase in ("wander_approach", "align", "rotate"):
+            # Add stronger low-frequency sway so the front-half path is visibly non-linear.
+            sway_amp = 0.010 if phase == "wander_approach" else 0.004
+            target = target.copy()
+            target[0] += sway_amp * np.sin(0.15 * t + 0.6) + 0.003 * np.sin(0.51 * t + 0.9)
+            target[1] += sway_amp * np.cos(0.11 * t + 1.1) + 0.004 * np.sin(0.37 * t + 0.2)
+
         step_speed = base_speed
         if phase == "forward":
             step_speed = forward_push_step_size
+        elif phase in ("wander_approach", "align", "rotate"):
+            # Stronger speed modulation plus occasional slowdowns for obvious variability.
+            speed_wave = 1.0 + 0.42 * np.sin(0.10 * t + 1.3) + 0.14 * np.sin(0.31 * t + 0.5)
+            step_speed = base_speed * float(np.clip(speed_wave, 0.48, 1.75))
+            if phase == "wander_approach":
+                step_speed *= 1.18
+            if phase in ("wander_approach", "align") and ((t % 17) in (0, 1)):
+                step_speed *= 0.45
+        elif phase == "move":
+            # Non-constant move speed to keep the transport phase visibly organic.
+            move_wave = 1.0 + 0.28 * np.sin(0.12 * t + 0.8) + 0.10 * np.sin(0.43 * t + 1.1)
+            step_speed = base_speed * float(np.clip(move_wave, 0.62, 1.45))
+            if rng.random() < 0.08:
+                step_speed *= float(rng.uniform(0.55, 1.45))
 
         if phase == "forward":
             next_base, base_delta = move_along_x_only(base_pos, forward_target_x, step_speed)
@@ -816,10 +831,7 @@ def run_episode(
         rewards.append(float(reward))
         dones.append(bool(done))
 
-        if phase == "handoff_raise" and (
-            abs(base_pos[2] - handoff_target_pos[2]) <= 0.004
-            or handoff_raise_progress >= max(1, post_release_raise_steps)
-        ):
+        if phase == "release" and release_progress >= release_total_steps:
             break
 
     obj_z_end = float(get_object_pos_from_joint(env, obj_joint)[2])
@@ -1054,11 +1066,13 @@ def main():
         default="bread",
         help="Reference object for composite placement.",
     )
+    parser.add_argument(
+        "--composite-max-steps",
+        type=int,
+        default=220,
+        help="Per-subtask horizon when composite mode is enabled.",
+    )
     args = parser.parse_args()
-    initial_base_height_offset = 0.30
-    composite_max_rounds = 1
-    composite_success_radius = 0.09
-    composite_handoff_raise_height = 0.32
 
     os.makedirs("hannes_demonstrations_test", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1144,81 +1158,30 @@ def main():
             combined_base_pos = []
             combined_frames = []
 
-            pending_targets = list(step_targets)
-            completed_targets = []
-            global_step_idx = 0
-
-            for round_idx in range(composite_max_rounds):
-                if len(pending_targets) == 0:
-                    break
-
-                print(
-                    f"[Composite] Episode {ep} round {round_idx + 1}/{composite_max_rounds}, "
-                    f"pending={pending_targets}"
+            for step_idx, target_name in enumerate(step_targets):
+                step_prompt = (
+                    f"{args.composite_instruction}. Step {step_idx + 1}: place {target_name} near {anchor_name}."
                 )
-                next_pending = []
-
-                for target_name in pending_targets:
-                    global_step_idx += 1
-                    step_prompt = (
-                        f"{args.composite_instruction}. Step {global_step_idx}: "
-                        f"place {target_name} near {anchor_name}."
-                    )
-                    step_result = run_episode(
-                        env,
-                        rng,
-                        target_name,
-                        valid_joints,
-                        policy=policy,
-                        prompt=step_prompt,
-                        max_steps=args.horizon,
-                        base_speed=0.006,
-                        sticky_after_close=args.sticky_after_close,
-                        place_near_object=anchor_name,
-                        place_offset=args.place_offset,
-                        reset_env=False,
-                        randomize_object_start=False,
-                        continue_from_current_pose=True,
-                        post_release_raise_height=composite_handoff_raise_height,
-                        post_release_raise_steps=20,
-                        initial_base_height_offset=initial_base_height_offset,
-                        force_high_start_pose=(global_step_idx == 1),
-                    )
-
-                    combined_actions.append(np.asarray(step_result["actions"], dtype=np.float32))
-                    combined_states.append(np.asarray(step_result["states"], dtype=np.float32))
-                    combined_base_pos.append(np.asarray(step_result["base_pos"], dtype=np.float32))
-                    combined_frames.extend(step_result["agent_frames"])
-
-                    anchor_pos_now = get_object_pos_from_joint(env, valid_joints[anchor_name])
-                    target_pos_now = get_object_pos_from_joint(env, valid_joints[target_name])
-                    if anchor_pos_now is None or target_pos_now is None:
-                        next_pending.append(target_name)
-                        continue
-
-                    xy_dist = float(np.linalg.norm(target_pos_now[:2] - anchor_pos_now[:2]))
-                    if xy_dist <= composite_success_radius:
-                        completed_targets.append(target_name)
-                        print(
-                            f"[Composite] target={target_name} done, "
-                            f"xy_dist={xy_dist:.3f} <= {composite_success_radius:.3f}"
-                        )
-                    else:
-                        next_pending.append(target_name)
-                        print(
-                            f"[Composite] target={target_name} retry, "
-                            f"xy_dist={xy_dist:.3f} > {composite_success_radius:.3f}"
-                        )
-
-                pending_targets = next_pending
-
-            if len(pending_targets) > 0:
-                print(
-                    f"[Composite] Episode {ep} unfinished after {composite_max_rounds} rounds: "
-                    f"{pending_targets}"
+                step_result = run_episode(
+                    env,
+                    rng,
+                    target_name,
+                    valid_joints,
+                    policy=policy,
+                    prompt=step_prompt,
+                    max_steps=args.composite_max_steps,
+                    base_speed=0.006,
+                    sticky_after_close=args.sticky_after_close,
+                    place_near_object=anchor_name,
+                    place_offset=args.place_offset,
+                    reset_env=False,
+                    randomize_object_start=False,
                 )
-            else:
-                print(f"[Composite] Episode {ep} all targets completed: {completed_targets}")
+
+                combined_actions.append(np.asarray(step_result["actions"], dtype=np.float32))
+                combined_states.append(np.asarray(step_result["states"], dtype=np.float32))
+                combined_base_pos.append(np.asarray(step_result["base_pos"], dtype=np.float32))
+                combined_frames.extend(step_result["agent_frames"])
 
             ep_actions = np.concatenate(combined_actions, axis=0) if len(combined_actions) > 0 else np.zeros((0, 6), dtype=np.float32)
             ep_states = np.concatenate(combined_states, axis=0) if len(combined_states) > 0 else np.zeros((0, 3), dtype=np.float32)
@@ -1299,7 +1262,6 @@ def main():
             sticky_after_close=args.sticky_after_close,
             place_near_object=near_name,
             place_offset=args.place_offset,
-            initial_base_height_offset=initial_base_height_offset,
         )
 
         agent_frames = ep_result["agent_frames"]
