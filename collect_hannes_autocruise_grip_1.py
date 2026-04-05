@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 
 import h5py
+import imageio.v2 as imageio
 import numpy as np
 import robosuite as suite
 
@@ -172,12 +173,59 @@ def set_joint_scalar(env, joint_name, value):
     env.sim.data.qvel[vel_addr] = 0.0
 
 
+def interpolate_joint_targets(start, target, alpha):
+    return (1.0 - alpha) * start + alpha * target
+
+
+def clip_joint_targets(targets, low, high):
+    return np.minimum(np.maximum(targets, low), high)
+
+
+def apply_scripted_human_pose(
+    env,
+    base_pos,
+    base_quat,
+    arm_slide_joint_names,
+    arm_slide_des,
+    arm_rot_joint_names,
+    arm_rot_des,
+):
+    set_base_pose(env, base_pos, base_quat)
+    for joint_name, joint_value in zip(arm_slide_joint_names, arm_slide_des):
+        set_joint_scalar(env, joint_name, float(joint_value))
+    for joint_name, joint_value in zip(arm_rot_joint_names, arm_rot_des):
+        set_joint_scalar(env, joint_name, float(joint_value))
+    env.sim.forward()
+
+
+def export_episode_videos(hdf5_path, fps):
+    video_dir = os.path.join(os.path.dirname(hdf5_path), "preview_videos")
+    os.makedirs(video_dir, exist_ok=True)
+    exported = []
+
+    with h5py.File(hdf5_path, "r") as f:
+        for group_name in f.keys():
+            if not group_name.startswith("episode_"):
+                continue
+            grp = f[group_name]
+            for key in ("agentview_images", "sideview_images"):
+                if key not in grp:
+                    continue
+                frames = np.asarray(grp[key])
+                mp4_name = f"{os.path.splitext(os.path.basename(hdf5_path))[0]}_{group_name}_{key}.mp4"
+                mp4_path = os.path.join(video_dir, mp4_name)
+                imageio.mimsave(mp4_path, frames, fps=fps)
+                exported.append(mp4_path)
+
+    return exported
+
+
 def run_episode(
     env,
     rng,
     chosen_obj,
     joints,
-    max_steps=260,
+    max_steps=None,
     base_speed=0.006,
     capture_images=False,
     image_height=512,
@@ -202,7 +250,7 @@ def run_episode(
     obj_random[1] = np.clip(obj_initial[1] + rng.uniform(-0.08, 0.08), -0.14, 0.14)
     set_object_pos(env, obj_joint, obj_random, quat=obj_upright_quat)
 
-    desired_align_z = float(obj_random[2] - 0.06)
+    desired_align_z = float(obj_random[2] - 0.045)
     sampled_base_z = desired_align_z + rng.uniform(-0.08, 0.25)
     base_z_min = float(obj_random[2] + 0.12)
     base_pos = np.array(
@@ -223,7 +271,7 @@ def run_episode(
     front_clearance = 0.10
     pregrasp_clearance = 0.085
     grasp_clearance = 0.055
-    target_y_offset = 0.02
+    target_y_offset = 0.07
 
     actions = []
     states = []
@@ -231,6 +279,7 @@ def run_episode(
     dones = []
     base_pos_seq = []
     base_delta_seq = []
+    arm_rot_seq = []
     agentview_seq = []
     sideview_seq = []
 
@@ -247,10 +296,35 @@ def run_episode(
     yaw_low, yaw_high = env.sim.model.jnt_range[yaw_joint_id]
     yaw_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(yaw_joint_name)])
     pitch_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(pitch_joint_name)])
+    arm_slide_joint_names = ["robot0_arm_tx", "robot0_arm_ty", "robot0_arm_tz"]
+    arm_slide_initial = np.array(
+        [float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(name)]) for name in arm_slide_joint_names],
+        dtype=np.float64,
+    )
+    arm_rot_joint_names = ["robot0_arm_rx", "robot0_arm_ry", "robot0_arm_rz"]
+    arm_rot_initial = np.array(
+        [float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(name)]) for name in arm_rot_joint_names],
+        dtype=np.float64,
+    )
+    arm_rot_low = np.array(
+        [env.sim.model.jnt_range[env.sim.model.joint_name2id(name)][0] for name in arm_rot_joint_names],
+        dtype=np.float64,
+    )
+    arm_rot_high = np.array(
+        [env.sim.model.jnt_range[env.sim.model.joint_name2id(name)][1] for name in arm_rot_joint_names],
+        dtype=np.float64,
+    )
     yaw_dir = -front_sign
     yaw_margin = 0.01
     yaw_target = float((yaw_high - yaw_margin) if yaw_dir > 0 else (yaw_low + yaw_margin))
-    rotate_total_steps = 60
+    arm_rot_target = clip_joint_targets(
+        arm_rot_initial + np.array([0.18, 0.14 * front_sign, 0.0], dtype=np.float64),
+        arm_rot_low,
+        arm_rot_high,
+    )
+    rotate_total_steps = 90
+    rotate_yaw_tol = 0.04
+    rotate_ready_count = 0
     forward_push_steps = 16
     forward_push_distance = 0.084
     forward_push_step_size = forward_push_distance / max(1, forward_push_steps)
@@ -268,14 +342,19 @@ def run_episode(
     grasp_progress = 0
     grasp_lock_progress = 0
     hold_progress = 0
+    sticky_success = 0
     front_ready_count = 0
     rotate_anchor_x = None
     rotate_anchor_pos = None
     front_enter_clearance = front_clearance
     front_exit_clearance = max(0.07, front_clearance - 0.02)
     front_latched = False
+    align_contact_count = 0
+    align_contact_retreat_steps = 5
 
-    for t in range(max_steps):
+    step_limit = max_steps if max_steps is not None else 5000
+
+    for t in range(step_limit):
         action = np.zeros(6, dtype=np.float32)
         obj_now = get_object_pos_from_joint(env, obj_joint)
         target_y_now_align = float(obj_now[1] + target_y_offset)
@@ -292,7 +371,7 @@ def run_episode(
             obj_x=float(obj_now[0]),
             clearance=front_enter_clearance,
             front_sign=front_sign,
-        ) and (not robot_can_contact)
+        )
 
         front_ready_exit = hand_is_on_front_side(
             hand_min_x=hand_min_x,
@@ -300,7 +379,7 @@ def run_episode(
             obj_x=float(obj_now[0]),
             clearance=front_exit_clearance,
             front_sign=front_sign,
-        ) and (not robot_can_contact)
+        )
 
         if front_latched:
             front_latched = front_ready_exit
@@ -311,7 +390,14 @@ def run_episode(
             target = front_target
             action[0] = 0.0
             action[1] = 0.0
-            if robot_can_contact or (not front_latched):
+            if robot_can_contact:
+                align_contact_count += 1
+            else:
+                align_contact_count = 0
+
+            need_retreat = (not front_latched) or (align_contact_count >= align_contact_retreat_steps)
+
+            if need_retreat:
                 if front_sign > 0:
                     retreat_x = max(base_pos[0] + 0.015, obj_now[0] + front_enter_clearance + 0.03)
                 else:
@@ -337,7 +423,12 @@ def run_episode(
             action[0] = 0.0
             action[1] = 0.0
             rotate_progress += 1
-            if rotate_progress >= rotate_total_steps:
+            yaw_now = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(yaw_joint_name)])
+            if abs(yaw_now - yaw_target) <= rotate_yaw_tol:
+                rotate_ready_count += 1
+            else:
+                rotate_ready_count = 0
+            if rotate_progress >= rotate_total_steps and rotate_ready_count >= 3:
                 phase = "forward"
                 forward_progress = 0
                 forward_anchor_pos = base_pos.copy()
@@ -399,6 +490,7 @@ def run_episode(
             grasp_lock_progress += 1
             if grasp_lock_progress >= grasp_lock_steps:
                 phase = "hold"
+                sticky_success = 1
 
         else:
             target = grasp_target
@@ -438,6 +530,14 @@ def run_episode(
         else:
             yaw_des = yaw_initial
 
+        if phase == "rotate":
+            arm_rot_alpha = min(1.0, rotate_progress / max(1, rotate_total_steps))
+            arm_rot_des = interpolate_joint_targets(arm_rot_initial, arm_rot_target, arm_rot_alpha)
+        elif phase in ("forward", "grasp", "grasp_lock", "hold"):
+            arm_rot_des = arm_rot_target.copy()
+        else:
+            arm_rot_des = arm_rot_initial.copy()
+
         step_speed = base_speed
         if phase == "forward":
             step_speed = forward_push_step_size
@@ -450,20 +550,44 @@ def run_episode(
             next_base, base_delta = move_towards(base_pos, target, step_speed)
         base_pos = next_base
 
-        set_base_pose(env, base_pos, base_quat)
-        set_joint_scalar(env, pitch_joint_name, pitch_initial)
-        set_joint_scalar(env, yaw_joint_name, yaw_des)
+        action[0] = float(pitch_initial)
+        action[1] = float(yaw_des)
+
+        apply_scripted_human_pose(
+            env,
+            base_pos,
+            base_quat,
+            arm_slide_joint_names,
+            arm_slide_initial,
+            arm_rot_joint_names,
+            arm_rot_des,
+        )
+        set_joint_scalar(env, pitch_joint_name, float(pitch_initial))
+        set_joint_scalar(env, yaw_joint_name, float(yaw_des))
         env.sim.forward()
 
         states.append(get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names))
-        action_log = action.copy()
-        action_log[0] = float(pitch_initial)
-        action_log[1] = float(yaw_des)
-        actions.append(action_log)
+        actions.append(action.copy())
         base_pos_seq.append(base_pos.copy())
         base_delta_seq.append(base_delta.astype(np.float32))
+        arm_rot_seq.append(arm_rot_des.astype(np.float32))
 
-        obs, reward, done, _ = env.step(action)
+        env_action = np.zeros((env.action_dim,), dtype=np.float32)
+        env_action[-6:] = action
+        obs, reward, done, _ = env.step(env_action)
+        apply_scripted_human_pose(
+            env,
+            base_pos,
+            base_quat,
+            arm_slide_joint_names,
+            arm_slide_initial,
+            arm_rot_joint_names,
+            arm_rot_des,
+        )
+        set_joint_scalar(env, pitch_joint_name, float(pitch_initial))
+        set_joint_scalar(env, yaw_joint_name, float(yaw_des))
+        env.sim.forward()
+        obs = env._get_observations(force_update=True)
         rewards.append(float(reward))
         dones.append(bool(done))
 
@@ -473,19 +597,19 @@ def run_episode(
             if agent is not None:
                 if agent.ndim == 3 and agent.shape[2] >= 3:
                     agent = agent[:, :, :3]
+                agent = agent[::-1]
                 agentview_seq.append(np.asarray(agent, dtype=np.uint8))
             if side is not None:
                 if side.ndim == 3 and side.shape[2] >= 3:
                     side = side[:, :, :3]
+                side = side[::-1]
                 sideview_seq.append(np.asarray(side, dtype=np.uint8))
-
-        # Trim repetitive tail: once we have stayed in hold phase long enough, stop the demo early
         if phase == "hold" and hold_progress >= 25:
             break
 
 
     obj_z_end = float(get_object_pos_from_joint(env, obj_joint)[2])
-    lifted = int((obj_z_end - obj_z_start) > 0.03)
+    lifted = int(sticky_success)
 
     result = {
         "actions": np.asarray(actions),
@@ -494,7 +618,9 @@ def run_episode(
         "dones": np.asarray(dones, dtype=np.bool_),
         "base_pos": np.asarray(base_pos_seq, dtype=np.float32),
         "base_delta": np.asarray(base_delta_seq, dtype=np.float32),
+        "arm_rot": np.asarray(arm_rot_seq, dtype=np.float32),
         "chosen_object": chosen_obj,
+        "sticky_success": int(sticky_success),
         "lift_success": lifted,
         "obj_z_start": obj_z_start,
         "obj_z_end": obj_z_end,
@@ -515,15 +641,30 @@ def main():
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--control-freq", type=int, default=20)
-    parser.add_argument("--horizon", type=int, default=1000)
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=None
+    )
     parser.add_argument("--target-object", type=str, default="can")
-    parser.add_argument("--output-format", type=str, default="episode", choices=["episode", "autocruise"], help="Output file structure; episode output stores rendered views by default")
+    parser.add_argument(
+        "--output-format",
+        type=str, default="episode", choices=["episode", "autocruise"],
+    )
+    parser.add_argument(
+        "--export-video",
+        action="store_true",
+        default=False
+    )
     args = parser.parse_args()
     is_episode_output = args.output_format == "episode"
 
     os.makedirs("hannes_demonstrations", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output = args.output or os.path.join("hannes_demonstrations", f"hannes_{args.task}_autocruise_{timestamp}.hdf5")
+    default_stem = "episode" if is_episode_output else "autocruise"
+    output = args.output or os.path.join("hannes_demonstrations", f"hannes_{args.task}_{default_stem}_{timestamp}.hdf5")
+
+    env_horizon = args.horizon if args.horizon is not None else 5000
 
     env = suite.make(
         args.task,
@@ -532,7 +673,7 @@ def main():
         has_offscreen_renderer=bool(is_episode_output),
         use_camera_obs=False,
         control_freq=args.control_freq,
-        horizon=args.horizon,
+        horizon=env_horizon,
         ignore_done=True,
         reward_shaping=True,
         use_object_obs=False,
@@ -544,10 +685,10 @@ def main():
         "env_kwargs": {
             "robots": "Hannes",
             "has_renderer": False,
-            "has_offscreen_renderer": False,
+            "has_offscreen_renderer": bool(is_episode_output),
             "use_camera_obs": False,
             "control_freq": args.control_freq,
-            "horizon": args.horizon,
+            "horizon": env_horizon,
             "ignore_done": True,
             "reward_shaping": True,
             "use_object_obs": False,
@@ -569,9 +710,6 @@ def main():
         except Exception:
             pass
 
-    if len(valid_joints) == 0:
-        raise RuntimeError("No target object joints found (expected milk_joint0 or can_joint0).")
-
     print("=== Hannes Auto Cruise Collection ===")
     print("Output:", output)
     print("Episodes:", args.episodes)
@@ -591,8 +729,6 @@ def main():
 
         for ep in range(args.episodes):
             if args.target_object:
-                if args.target_object not in valid_joints:
-                    raise ValueError(f"target object {args.target_object} not available, choose from {list(valid_joints.keys())}")
                 chosen = args.target_object
             else:
                 chosen = object_names[ep % len(object_names)]
@@ -601,6 +737,7 @@ def main():
                 rng,
                 chosen,
                 valid_joints,
+                max_steps=args.horizon,
                 capture_images=bool(is_episode_output),
             )
 
@@ -613,6 +750,7 @@ def main():
                 grp.create_dataset("dones", data=ep_result["dones"], compression="gzip")
                 grp.create_dataset("base_pos", data=ep_result["base_pos"], compression="gzip")
                 grp.create_dataset("base_delta", data=ep_result["base_delta"], compression="gzip")
+                grp.create_dataset("arm_rot", data=ep_result["arm_rot"], compression="gzip")
             else:
                 ep_name = f"episode_{ep}"
                 grp = f.create_group(ep_name)
@@ -622,6 +760,7 @@ def main():
                 grp.create_dataset("dones", data=ep_result["dones"], compression="gzip")
                 grp.create_dataset("base_pos", data=ep_result["base_pos"], compression="gzip")
                 grp.create_dataset("base_delta", data=ep_result["base_delta"], compression="gzip")
+                grp.create_dataset("arm_rot", data=ep_result["arm_rot"], compression="gzip")
                 if "agentview_images" in ep_result:
                     grp.create_dataset("agentview_images", data=ep_result["agentview_images"], compression="gzip")
                 if "sideview_images" in ep_result:
@@ -640,12 +779,21 @@ def main():
                 "ringfinger_cmd",
                 "littlefinger_cmd",
             ])
+            grp.attrs["scripted_motion_fields"] = json.dumps([
+                "base_x",
+                "base_y",
+                "base_z",
+                "arm_rx",
+                "arm_ry",
+                "arm_rz",
+            ])
+            grp.attrs["sticky_success"] = int(ep_result["sticky_success"])
             grp.attrs["lift_success"] = int(ep_result["lift_success"])
             grp.attrs["obj_z_start"] = float(ep_result["obj_z_start"])
             grp.attrs["obj_z_end"] = float(ep_result["obj_z_end"])
 
             total_steps += int(ep_result["actions"].shape[0])
-            successes += int(ep_result["lift_success"])
+            successes += int(ep_result["sticky_success"])
 
             if (ep + 1) % 10 == 0:
                 print(f"Episode {ep + 1}/{args.episodes}, success so far: {successes}/{ep + 1}")
@@ -660,6 +808,11 @@ def main():
             f.attrs["num_episodes"] = args.episodes
 
     env.close()
+
+    if is_episode_output and args.export_video:
+        exported_videos = export_episode_videos(output, fps=args.control_freq)
+        for video_path in exported_videos:
+            print("Exported video:", video_path)
 
     print("=== Done ===")
     print("Saved:", output)
