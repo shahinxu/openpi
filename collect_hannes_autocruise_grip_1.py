@@ -219,7 +219,7 @@ def export_episode_videos(hdf5_path, fps):
             if not group_name.startswith("episode_"):
                 continue
             grp = f[group_name]
-            for key in ("agentview_images", "sideview_images", "arm_eyeview_images"):
+            for key in ("agentview_images", "sideview_images", "arm_eyeview_images", "eye_view_images"):
                 if key not in grp:
                     continue
                 frames = np.asarray(grp[key])
@@ -239,6 +239,7 @@ def run_episode(
     max_steps=None,
     base_speed=0.006,
     capture_images=False,
+    image_views=None,
     image_height=512,
     image_width=512,
 ):
@@ -308,7 +309,10 @@ def run_episode(
     arm_rot_seq = []
     agentview_seq = []
     sideview_seq = []
-    arm_eyeview_seq = []
+    eye_view_seq = []
+
+    if image_views is None:
+        image_views = {"agentview", "sideview", "eye_view"}
 
     obj_z_start = float(obj_pos[2])
     desired_eef_z = float(get_eef_pos(obs, env)[2])
@@ -627,10 +631,14 @@ def run_episode(
                 arm_eye_cam_offset += arm_eye_follow_alpha * (arm_eye_drift_target - arm_eye_cam_offset)
                 arm_eye_cam_offset = np.clip(arm_eye_cam_offset, 0.0, arm_eye_drift_max_delta)
                 env.sim.model.cam_pos[arm_eye_cam_id] = arm_eye_cam_base_pos + arm_eye_cam_offset
-            agent = env.sim.render(height=image_height, width=image_width, camera_name="agentview")
-            side = env.sim.render(height=image_height, width=image_width, camera_name="sideview")
+            agent = None
+            side = None
             arm_eye = None
-            if arm_eye_camera_name is not None:
+            if "agentview" in image_views:
+                agent = env.sim.render(height=image_height, width=image_width, camera_name="agentview")
+            if "sideview" in image_views:
+                side = env.sim.render(height=image_height, width=image_width, camera_name="sideview")
+            if "eye_view" in image_views and arm_eye_camera_name is not None:
                 arm_eye = env.sim.render(height=image_height, width=image_width, camera_name=arm_eye_camera_name)
             if agent is not None:
                 if agent.ndim == 3 and agent.shape[2] >= 3:
@@ -647,7 +655,7 @@ def run_episode(
                     arm_eye = arm_eye[:, :, :3]
                 arm_eye = arm_eye[::-1]
                 arm_eye = np.rot90(arm_eye, 2)
-                arm_eyeview_seq.append(np.asarray(arm_eye, dtype=np.uint8))
+                eye_view_seq.append(np.asarray(arm_eye, dtype=np.uint8))
         if phase == "hold" and hold_progress >= 25:
             break
 
@@ -674,8 +682,11 @@ def run_episode(
         result["agentview_images"] = np.asarray(agentview_seq, dtype=np.uint8)
     if capture_images and len(sideview_seq) == len(actions):
         result["sideview_images"] = np.asarray(sideview_seq, dtype=np.uint8)
-    if capture_images and len(arm_eyeview_seq) == len(actions):
-        result["arm_eyeview_images"] = np.asarray(arm_eyeview_seq, dtype=np.uint8)
+    if capture_images and len(eye_view_seq) == len(actions):
+        eye_view_arr = np.asarray(eye_view_seq, dtype=np.uint8)
+        result["eye_view_images"] = eye_view_arr
+        # Backward-compatible alias for older readers.
+        result["arm_eyeview_images"] = eye_view_arr
 
     return result
 
@@ -702,8 +713,25 @@ def main():
         action="store_true",
         default=False
     )
+    parser.add_argument(
+        "--image-views",
+        type=str,
+        default="agentview,sideview,eye_view",
+        help="Comma-separated subset of: agentview,sideview,eye_view. Use 'none' to disable image capture.",
+    )
     args = parser.parse_args()
     is_episode_output = args.output_format == "episode"
+
+    view_tokens = [v.strip().lower() for v in args.image_views.split(",") if v.strip()]
+    if "none" in view_tokens:
+        image_views = set()
+    else:
+        valid_views = {"agentview", "sideview", "eye_view"}
+        unknown = [v for v in view_tokens if v not in valid_views]
+        if unknown:
+            raise ValueError(f"Unknown --image-views entries: {unknown}. Valid values are agentview,sideview,eye_view,none")
+        image_views = set(view_tokens)
+    capture_images = len(image_views) > 0
 
     os.makedirs("hannes_demonstrations", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -716,7 +744,7 @@ def main():
         args.task,
         robots="Hannes",
         has_renderer=False,
-        has_offscreen_renderer=bool(is_episode_output),
+        has_offscreen_renderer=bool(capture_images),
         use_camera_obs=False,
         control_freq=args.control_freq,
         horizon=env_horizon,
@@ -731,7 +759,7 @@ def main():
         "env_kwargs": {
             "robots": "Hannes",
             "has_renderer": False,
-            "has_offscreen_renderer": bool(is_episode_output),
+            "has_offscreen_renderer": bool(capture_images),
             "use_camera_obs": False,
             "control_freq": args.control_freq,
             "horizon": env_horizon,
@@ -784,7 +812,8 @@ def main():
                 chosen,
                 valid_joints,
                 max_steps=args.horizon,
-                capture_images=bool(is_episode_output),
+                capture_images=bool(capture_images),
+                image_views=image_views,
             )
 
             if args.output_format == "autocruise":
@@ -797,6 +826,12 @@ def main():
                 grp.create_dataset("base_pos", data=ep_result["base_pos"], compression="gzip")
                 grp.create_dataset("base_delta", data=ep_result["base_delta"], compression="gzip")
                 grp.create_dataset("arm_rot", data=ep_result["arm_rot"], compression="gzip")
+                if "agentview_images" in ep_result:
+                    grp.create_dataset("agentview_images", data=ep_result["agentview_images"], compression="gzip")
+                if "sideview_images" in ep_result:
+                    grp.create_dataset("sideview_images", data=ep_result["sideview_images"], compression="gzip")
+                if "eye_view_images" in ep_result:
+                    grp.create_dataset("eye_view_images", data=ep_result["eye_view_images"], compression="gzip")
             else:
                 ep_name = f"episode_{ep}"
                 grp = f.create_group(ep_name)
@@ -811,8 +846,8 @@ def main():
                     grp.create_dataset("agentview_images", data=ep_result["agentview_images"], compression="gzip")
                 if "sideview_images" in ep_result:
                     grp.create_dataset("sideview_images", data=ep_result["sideview_images"], compression="gzip")
-                if "arm_eyeview_images" in ep_result:
-                    grp.create_dataset("arm_eyeview_images", data=ep_result["arm_eyeview_images"], compression="gzip")
+                if "eye_view_images" in ep_result:
+                    grp.create_dataset("eye_view_images", data=ep_result["eye_view_images"], compression="gzip")
 
             grp.attrs["num_samples"] = int(ep_result["actions"].shape[0])
             grp.attrs["model_file"] = env.sim.model.get_xml()
