@@ -27,6 +27,17 @@ def resolve_joint_name(env, joint_candidates):
     return None
 
 
+def resolve_camera_name(env, camera_base_name):
+    candidates = [camera_base_name, f"robot0_{camera_base_name}"]
+    for name in candidates:
+        try:
+            _ = env.sim.model.camera_name2id(name)
+            return name
+        except Exception:
+            continue
+    return None
+
+
 def get_grip_pos_mean(env, finger_joint_names):
     finger_qpos = []
     for joint_name in finger_joint_names:
@@ -208,7 +219,7 @@ def export_episode_videos(hdf5_path, fps):
             if not group_name.startswith("episode_"):
                 continue
             grp = f[group_name]
-            for key in ("agentview_images", "sideview_images"):
+            for key in ("agentview_images", "sideview_images", "arm_eyeview_images"):
                 if key not in grp:
                     continue
                 frames = np.asarray(grp[key])
@@ -236,6 +247,21 @@ def run_episode(
     base_quat = np.array([0.707, 0.0, 0.0, -0.707], dtype=np.float64)
 
     obj_joint = joints[chosen_obj]
+    arm_eye_camera_name = resolve_camera_name(env, "arm_eyeview")
+    # Head-drift: smooth random walk within a bounded range relative to default cam pos.
+    # Simulates the natural continuous movement of a human head.
+    arm_eye_cam_id = None
+    arm_eye_cam_base_pos = None
+    arm_eye_cam_offset = np.zeros(3, dtype=np.float64)
+    # Camera position is constrained to: base_pos + [0, max_delta] per axis.
+    # This makes base_pos the lower bound, with only higher upper bounds.
+    arm_eye_drift_max_delta = np.array([0.16, 0.12, 0.10], dtype=np.float64)
+    arm_eye_drift_target = np.zeros(3, dtype=np.float64)
+    arm_eye_target_refresh_steps = 32
+    arm_eye_follow_alpha = 0.055
+    if arm_eye_camera_name is not None:
+        arm_eye_cam_id = env.sim.model.camera_name2id(arm_eye_camera_name)
+        arm_eye_cam_base_pos = env.sim.model.cam_pos[arm_eye_cam_id].copy()
     hand_site_ids = get_hand_site_ids(env)
     obj_initial = get_object_pos_from_joint(env, obj_joint)
     obj_initial_quat = get_object_quat_from_joint(env, obj_joint)
@@ -250,7 +276,7 @@ def run_episode(
     obj_random[1] = np.clip(obj_initial[1] + rng.uniform(-0.08, 0.08), -0.14, 0.14)
     set_object_pos(env, obj_joint, obj_random, quat=obj_upright_quat)
 
-    desired_align_z = float(obj_random[2] - 0.045)
+    desired_align_z = float(obj_random[2] - 0.035)
     sampled_base_z = desired_align_z + rng.uniform(-0.08, 0.25)
     base_z_min = float(obj_random[2] + 0.12)
     base_pos = np.array(
@@ -282,6 +308,7 @@ def run_episode(
     arm_rot_seq = []
     agentview_seq = []
     sideview_seq = []
+    arm_eyeview_seq = []
 
     obj_z_start = float(obj_pos[2])
     desired_eef_z = float(get_eef_pos(obs, env)[2])
@@ -330,7 +357,8 @@ def run_episode(
     forward_push_step_size = forward_push_distance / max(1, forward_push_steps)
     palm_center_tol = 0.018
     grasp_total_steps = 45
-    hold_close_value = 0.55
+    hold_close_value = 0.42
+    grasp_start_value = 0.18
     grasp_lock_steps = 16
 
     phase = "align"
@@ -474,7 +502,7 @@ def run_episode(
             action[0] = 0.0
             action[1] = 0.0
             grasp_alpha = min(1.0, grasp_progress / max(1, grasp_total_steps - 1))
-            action[2:] = 0.22 + grasp_alpha * (hold_close_value - 0.22)
+            action[2:] = grasp_start_value + grasp_alpha * (hold_close_value - grasp_start_value)
             grasp_progress += 1
             if grasp_progress >= grasp_total_steps:
                 phase = "grasp_lock"
@@ -592,8 +620,18 @@ def run_episode(
         dones.append(bool(done))
 
         if capture_images:
+            # Update head-drift offset each frame before rendering.
+            if arm_eye_cam_id is not None:
+                if t % arm_eye_target_refresh_steps == 0:
+                    arm_eye_drift_target = rng.uniform(np.zeros(3, dtype=np.float64), arm_eye_drift_max_delta)
+                arm_eye_cam_offset += arm_eye_follow_alpha * (arm_eye_drift_target - arm_eye_cam_offset)
+                arm_eye_cam_offset = np.clip(arm_eye_cam_offset, 0.0, arm_eye_drift_max_delta)
+                env.sim.model.cam_pos[arm_eye_cam_id] = arm_eye_cam_base_pos + arm_eye_cam_offset
             agent = env.sim.render(height=image_height, width=image_width, camera_name="agentview")
             side = env.sim.render(height=image_height, width=image_width, camera_name="sideview")
+            arm_eye = None
+            if arm_eye_camera_name is not None:
+                arm_eye = env.sim.render(height=image_height, width=image_width, camera_name=arm_eye_camera_name)
             if agent is not None:
                 if agent.ndim == 3 and agent.shape[2] >= 3:
                     agent = agent[:, :, :3]
@@ -604,6 +642,12 @@ def run_episode(
                     side = side[:, :, :3]
                 side = side[::-1]
                 sideview_seq.append(np.asarray(side, dtype=np.uint8))
+            if arm_eye is not None:
+                if arm_eye.ndim == 3 and arm_eye.shape[2] >= 3:
+                    arm_eye = arm_eye[:, :, :3]
+                arm_eye = arm_eye[::-1]
+                arm_eye = np.rot90(arm_eye, 2)
+                arm_eyeview_seq.append(np.asarray(arm_eye, dtype=np.uint8))
         if phase == "hold" and hold_progress >= 25:
             break
 
@@ -630,6 +674,8 @@ def run_episode(
         result["agentview_images"] = np.asarray(agentview_seq, dtype=np.uint8)
     if capture_images and len(sideview_seq) == len(actions):
         result["sideview_images"] = np.asarray(sideview_seq, dtype=np.uint8)
+    if capture_images and len(arm_eyeview_seq) == len(actions):
+        result["arm_eyeview_images"] = np.asarray(arm_eyeview_seq, dtype=np.uint8)
 
     return result
 
@@ -765,6 +811,8 @@ def main():
                     grp.create_dataset("agentview_images", data=ep_result["agentview_images"], compression="gzip")
                 if "sideview_images" in ep_result:
                     grp.create_dataset("sideview_images", data=ep_result["sideview_images"], compression="gzip")
+                if "arm_eyeview_images" in ep_result:
+                    grp.create_dataset("arm_eyeview_images", data=ep_result["arm_eyeview_images"], compression="gzip")
 
             grp.attrs["num_samples"] = int(ep_result["actions"].shape[0])
             grp.attrs["model_file"] = env.sim.model.get_xml()
