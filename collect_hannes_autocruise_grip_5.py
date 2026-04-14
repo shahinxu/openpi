@@ -259,6 +259,9 @@ def run_episode(
     pre_approach_speed=0.018,
     align_speed=0.008,
     sticky_after_close=False,
+    place_near_object=None,
+    place_offset=0.08,
+    lift_height=0.12,
     image_height=512,
     image_width=512,
 ):
@@ -295,6 +298,9 @@ def run_episode(
         table_top_z = float(env.model.mujoco_arena.table_offset[2])
     except Exception:
         table_top_z = 0.8
+    # 20 cm above table is the absolute floor for the base joint.
+    # This accounts for arm link drop due to rotation (arm_ry up to 30 deg,
+    # arm link ~0.32 m -> max drop ~0.16 m, plus 4 cm safety margin).
     base_z_floor = table_top_z + 0.05
 
     obj_random = obj_initial.copy()
@@ -389,6 +395,30 @@ def run_episode(
     hold_close_value = 0.42
     grasp_start_value = 0.18
     grasp_lock_steps = 16
+    release_pose_steps = 30
+    release_total_steps = 36
+    release_open_value = -0.75
+    release_pose_yaw_target = float(np.clip(yaw_initial - np.pi / 2.0, yaw_low, yaw_high))
+    release_target_pos = None
+    release_arm_rot_start = None
+    release_arm_rot_target = clip_joint_targets(arm_rot_initial.copy(), arm_rot_low, arm_rot_high)
+    lift_steps = 22
+    move_near_steps = 60
+    move_near_tol = 0.03
+    lower_steps = 24
+    lower_tol = 0.01
+
+    near_obj_name = None
+    near_obj_joint = None
+    if place_near_object in joints and place_near_object != chosen_obj:
+        near_obj_name = place_near_object
+        near_obj_joint = joints[place_near_object]
+    else:
+        for cand_name, cand_joint in joints.items():
+            if cand_name != chosen_obj:
+                near_obj_name = cand_name
+                near_obj_joint = cand_joint
+                break
 
     phase = "approach_far"
     rotate_progress = 0
@@ -399,6 +429,18 @@ def run_episode(
     grasp_progress = 0
     grasp_lock_progress = 0
     hold_progress = 0
+    lift_progress = 0
+    move_near_progress = 0
+    lower_progress = 0
+    release_pose_progress = 0
+    release_progress = 0
+    lift_target_z = None
+    lift_anchor_pos = None
+    lift_target_pos = None
+    move_target_pos = None
+    lower_target_pos = None
+    locked_wrist_yaw = None
+    locked_arm_rot_des = None
     sticky_success = 0
     sticky_attached = False
     sticky_ever_attached = False
@@ -461,7 +503,7 @@ def run_episode(
             action[0] = 0.0
             action[1] = 0.0
             approach_alpha = min(1.0, approach_far_progress / max(1, int(approach_turn_noise_steps) - 1))
-            ry_walk = approach_ry_rotate_rad * approach_alpha
+            ry_walk = -approach_ry_rotate_rad * approach_alpha
             if approach_far_progress < max(0, int(approach_turn_noise_steps)):
                 # One "turn" is defined as: move to one side, then return to center.
                 # This is a half-sine profile over one period.
@@ -610,7 +652,92 @@ def run_episode(
             action[2:] = hold_close_value
             grasp_lock_progress += 1
             if grasp_lock_progress >= grasp_lock_steps:
-                phase = "hold"
+                locked_wrist_yaw = float(yaw_target)
+                locked_arm_rot_des = arm_rot_hold_des.copy()
+                phase = "lift"
+                lift_progress = 0
+                lift_target_z = float(max(base_pos[2] + lift_height, base_z_floor + 0.05))
+                lift_anchor_pos = base_pos.copy()
+                lift_target_pos = lift_anchor_pos.copy()
+                lift_target_pos[2] = lift_target_z
+
+        elif phase == "lift":
+            if lift_anchor_pos is None:
+                lift_anchor_pos = base_pos.copy()
+            if lift_target_pos is None:
+                lift_target_pos = lift_anchor_pos.copy()
+                lift_target_pos[2] = float(max(base_pos[2] + lift_height, base_z_floor + 0.05))
+            target = lift_target_pos.copy()
+            action[0] = 0.0
+            action[1] = 0.0
+            action[2:] = 0.0
+            lift_progress += 1
+            if np.linalg.norm(base_pos - lift_target_pos) <= 0.003 or lift_progress >= lift_steps:
+                phase = "move_near"
+                move_near_progress = 0
+                move_target_pos = lift_target_pos.copy()
+
+        elif phase == "move_near":
+            if move_target_pos is None:
+                move_target_pos = base_pos.copy()
+            if near_obj_joint is not None:
+                near_obj_pos = get_object_pos_from_joint(env, near_obj_joint)
+                if near_obj_pos is not None:
+                    side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
+                    move_target_pos[0] = np.clip(float(near_obj_pos[0]), 0.02, 0.30)
+                    move_target_pos[1] = np.clip(float(near_obj_pos[1] + side_sign * place_offset), -0.18, 0.18)
+
+            target = move_target_pos.copy()
+            action[0] = 0.0
+            action[1] = 0.0
+            action[2:] = 0.0
+            move_near_progress += 1
+            reached_xy = float(np.linalg.norm(base_pos[:2] - move_target_pos[:2])) <= 0.003
+            if reached_xy or move_near_progress >= move_near_steps:
+                phase = "lower"
+                lower_progress = 0
+                lower_target_pos = move_target_pos.copy()
+                if lift_anchor_pos is None:
+                    lift_anchor_pos = base_pos.copy()
+                lower_target_pos[2] = lift_anchor_pos[2]
+
+        elif phase == "lower":
+            if lower_target_pos is None:
+                lower_target_pos = base_pos.copy()
+                if lift_anchor_pos is not None:
+                    lower_target_pos[2] = lift_anchor_pos[2]
+            target = lower_target_pos.copy()
+            action[0] = 0.0
+            action[1] = 0.0
+            action[2:] = 0.0
+            lower_progress += 1
+            if abs(float(base_pos[2] - lower_target_pos[2])) <= 0.003 or lower_progress >= lower_steps:
+                phase = "release"
+                release_progress = 0
+                release_target_pos = lower_target_pos.copy()
+
+        elif phase == "release_pose":
+            if release_target_pos is None:
+                release_target_pos = base_pos.copy()
+            if release_arm_rot_start is None:
+                release_arm_rot_start = arm_rot_hold_des.copy()
+            target = release_target_pos.copy()
+            action[0] = 0.0
+            action[1] = 0.0
+            action[2:] = hold_close_value
+            release_pose_progress += 1
+            if release_pose_progress >= release_pose_steps:
+                phase = "release"
+                release_progress = 0
+
+        elif phase == "release":
+            if release_target_pos is None:
+                release_target_pos = lower_target_pos.copy() if lower_target_pos is not None else base_pos.copy()
+            target = release_target_pos.copy()
+            action[0] = 0.0
+            action[1] = 0.0
+            action[2:] = release_open_value
+            release_progress += 1
 
         else:
             target = grasp_target
@@ -624,7 +751,7 @@ def run_episode(
             obj_now_stable = get_object_pos_from_joint(env, obj_joint)
             set_object_pos(env, obj_joint, obj_now_stable, quat=obj_upright_quat)
 
-        # Sticky contact mechanism: track object relative to palm and enforce offset
+        # Sticky contact mechanism: keep object pose relative to palm after close/contact.
         if sticky_after_close:
             palm_pos = get_palm_pos(env)
             if palm_pos is not None:
@@ -633,7 +760,7 @@ def run_episode(
                 obj_now_for_sticky = env.sim.data.qpos[obj_qpos_addr[0]:obj_qpos_addr[0] + 3].copy()
                 if sticky_attached and finger_mean < -0.4:
                     sticky_attached = False
-                if (not sticky_attached) and phase in ("grasp_lock", "hold"):
+                if (not sticky_attached) and phase in ("grasp_lock", "lift", "move_near", "lower"):
                     near_palm = np.linalg.norm(obj_now_for_sticky - palm_pos) < 0.05
                     if robot_can_contact or near_palm:
                         sticky_offset = obj_now_for_sticky - palm_pos
@@ -642,16 +769,17 @@ def run_episode(
                 if sticky_attached:
                     set_object_pos(env, obj_joint, palm_pos + sticky_offset, quat=obj_upright_quat)
 
-        # Height lock: compensate wrist-control-induced lifting by lowering base target z when needed
+        # Height lock: compensate wrist-control-induced lifting by lowering base target z when needed.
+        # Do not apply during align; align needs a fixed desired_align_z target to converge stably.
         eef_now = get_eef_pos(obs, env)
         z_err = float(eef_now[2] - desired_eef_z)
-        if z_err > 0.0 and phase in ("rotate", "forward", "grasp", "grasp_lock", "hold"):
+        if z_err > 0.0 and phase in ("rotate", "forward", "grasp", "grasp_lock", "lift", "move_near", "lower", "release_pose", "release"):
             target = target.copy()
             target[2] -= min(0.03, 1.2 * z_err)
 
         # No-lift guard: during/after rotation and grasp, z is not allowed to increase.
         # Keep align phase fully bidirectional in z so it can truly converge to desired_align_z.
-        if phase in ("rotate", "forward", "grasp", "grasp_lock"):
+        if phase in ("rotate", "forward", "grasp", "grasp_lock", "release_pose"):
             target = target.copy()
             target[2] = min(target[2], base_pos[2], desired_align_z)
 
@@ -669,7 +797,9 @@ def run_episode(
             else:
                 yaw_des = yaw_initial
                 action[1] = 0.0
-        elif phase in ("forward", "grasp", "grasp_lock", "hold"):
+        elif phase in ("grasp_lock", "lift", "move_near", "lower", "release_pose", "release"):
+            yaw_des = float(locked_wrist_yaw) if locked_wrist_yaw is not None else yaw_target
+        elif phase in ("forward", "grasp", "hold"):
             yaw_des = yaw_target
         else:
             yaw_des = yaw_initial
@@ -679,7 +809,9 @@ def run_episode(
             arm_rot_des = interpolate_joint_targets(arm_rot_initial, arm_rot_target, arm_rot_alpha)
         elif arm_rot_phase_override is not None:
             arm_rot_des = arm_rot_phase_override
-        elif phase in ("forward", "grasp", "grasp_lock", "hold"):
+        elif phase in ("grasp_lock", "lift", "move_near", "lower", "release_pose", "release"):
+            arm_rot_des = locked_arm_rot_des.copy() if locked_arm_rot_des is not None else arm_rot_target.copy()
+        elif phase in ("forward", "grasp", "hold"):
             arm_rot_des = arm_rot_target.copy()
         else:
             # Keep latest arm rotation through align so ry does not get reset.
@@ -698,7 +830,7 @@ def run_episode(
 
         if phase == "forward":
             next_base, base_delta = move_along_x_only(base_pos, forward_target_x, step_speed)
-        elif phase in ("approach_far", "align", "rotate", "grasp", "grasp_lock"):
+        elif phase in ("approach_far", "align", "rotate", "grasp", "grasp_lock", "release_pose"):
             next_base, base_delta = move_towards_xy_then_z(base_pos, target, step_speed)
         else:
             next_base, base_delta = move_towards(base_pos, target, step_speed)
@@ -770,7 +902,7 @@ def run_episode(
                 arm_eye = arm_eye[::-1]
                 arm_eye = np.rot90(arm_eye, 2)
                 eye_view_seq.append(np.asarray(arm_eye, dtype=np.uint8))
-        if phase == "hold" and hold_progress >= 25:
+        if phase == "release" and release_progress >= release_total_steps:
             break
 
 
@@ -831,6 +963,9 @@ def main():
     parser.add_argument("--yaw-comp-total-deg", type=float, default=90.0)
     parser.add_argument("--pre-approach-speed", type=float, default=0.018)
     parser.add_argument("--align-speed", type=float, default=0.008)
+    parser.add_argument("--place-near-object", type=str, default=None, help="Move near this object before release")
+    parser.add_argument("--place-offset", type=float, default=0.08, help="Lateral offset when moving near target object")
+    parser.add_argument("--lift-height", type=float, default=0.18, help="Base z lift amount after grasp")
     parser.add_argument("--sticky-after-close", action="store_true", default=True)
     args = parser.parse_args()
     is_episode_output = args.output_format == "episode"
@@ -926,6 +1061,9 @@ def main():
                 pre_approach_speed=args.pre_approach_speed,
                 align_speed=args.align_speed if hasattr(args, "align_speed") else 0.008,
                 sticky_after_close=args.sticky_after_close if hasattr(args, "sticky_after_close") else False,
+                place_near_object=args.place_near_object,
+                place_offset=args.place_offset,
+                lift_height=args.lift_height,
             )
 
             if args.output_format == "autocruise":
