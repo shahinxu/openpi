@@ -416,6 +416,7 @@ def run_episode(
     align_z_tol = 0.008
     approach_far_progress = 0
 
+    approach_rz_side_sign = 1.0 if rng.random() < 0.5 else -1.0
     step_limit = max_steps if max_steps is not None else 5000
 
     for t in range(step_limit):
@@ -461,14 +462,13 @@ def run_episode(
             action[0] = 0.0
             action[1] = 0.0
             approach_alpha = min(1.0, approach_far_progress / max(1, int(approach_turn_noise_steps) - 1))
-            ry_walk = approach_ry_rotate_rad * approach_alpha
+            ry_walk = -approach_ry_rotate_rad * approach_alpha
             if approach_far_progress < max(0, int(approach_turn_noise_steps)):
                 # One "turn" is defined as: move to one side, then return to center.
                 # This is a half-sine profile over one period.
                 period = max(1, int(approach_turn_noise_period))
-                cycle_idx = int(approach_far_progress // period)
                 phase_alpha = (approach_far_progress % period) / period
-                side_sign = 1.0 if (cycle_idx % 2 == 0) else -1.0
+                side_sign = approach_rz_side_sign
                 rz_noise = float(approach_turn_noise_amp) * side_sign * np.sin(np.pi * phase_alpha)
                 arm_rot_phase_override = clip_joint_targets(
                     arm_rot_initial + np.array([0.0, ry_walk, rz_noise], dtype=np.float64),
@@ -805,7 +805,7 @@ def main():
     parser.add_argument("--task", type=str, default="Lift")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--control-freq", type=int, default=20)
     parser.add_argument(
         "--horizon",

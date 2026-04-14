@@ -261,6 +261,8 @@ def run_episode(
     sticky_after_close=False,
     place_near_object=None,
     place_offset=0.08,
+    near_bias_x=0.0,
+    near_bias_y=0.0,
     lift_height=0.12,
     image_height=512,
     image_width=512,
@@ -403,10 +405,11 @@ def run_episode(
     release_arm_rot_start = None
     release_arm_rot_target = clip_joint_targets(arm_rot_initial.copy(), arm_rot_low, arm_rot_high)
     lift_steps = 22
-    move_near_steps = 60
+    move_near_steps = 80
     move_near_tol = 0.03
     lower_steps = 24
     lower_tol = 0.01
+    near_bias_xy = np.array([near_bias_x, near_bias_y], dtype=np.float64)
 
     near_obj_name = None
     near_obj_joint = None
@@ -431,6 +434,7 @@ def run_episode(
     hold_progress = 0
     lift_progress = 0
     move_near_progress = 0
+    move_near_max_steps = move_near_steps
     lower_progress = 0
     release_pose_progress = 0
     release_progress = 0
@@ -438,6 +442,7 @@ def run_episode(
     lift_anchor_pos = None
     lift_target_pos = None
     move_target_pos = None
+    move_near_base_to_palm_xy = np.zeros(2, dtype=np.float64)
     lower_target_pos = None
     locked_wrist_yaw = None
     locked_arm_rot_des = None
@@ -457,6 +462,7 @@ def run_episode(
     align_y_tol = 0.01
     align_z_tol = 0.008
     approach_far_progress = 0
+    approach_rz_side_sign = 1.0 if rng.random() < 0.5 else -1.0
 
     step_limit = max_steps if max_steps is not None else 5000
 
@@ -508,9 +514,8 @@ def run_episode(
                 # One "turn" is defined as: move to one side, then return to center.
                 # This is a half-sine profile over one period.
                 period = max(1, int(approach_turn_noise_period))
-                cycle_idx = int(approach_far_progress // period)
                 phase_alpha = (approach_far_progress % period) / period
-                side_sign = 1.0 if (cycle_idx % 2 == 0) else -1.0
+                side_sign = approach_rz_side_sign
                 rz_noise = float(approach_turn_noise_amp) * side_sign * np.sin(np.pi * phase_alpha)
                 arm_rot_phase_override = clip_joint_targets(
                     arm_rot_initial + np.array([0.0, ry_walk, rz_noise], dtype=np.float64),
@@ -676,16 +681,40 @@ def run_episode(
                 phase = "move_near"
                 move_near_progress = 0
                 move_target_pos = lift_target_pos.copy()
+                palm_pos = get_palm_pos(env)
+                if palm_pos is not None:
+                    move_near_base_to_palm_xy = palm_pos[:2] - base_pos[:2]
+                else:
+                    move_near_base_to_palm_xy = np.zeros(2, dtype=np.float64)
+                if near_obj_joint is not None:
+                    near_obj_pos = get_object_pos_from_joint(env, near_obj_joint)
+                    if near_obj_pos is not None:
+                        desired_palm_x = float(near_obj_pos[0] - near_bias_xy[0])
+                        side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
+                        desired_palm_y = float(near_obj_pos[1] + side_sign * place_offset - near_bias_xy[1])
+                        move_target_pos[0] = np.clip(desired_palm_x - float(move_near_base_to_palm_xy[0]), 0.02, 0.30)
+                        move_target_pos[1] = np.clip(desired_palm_y - float(move_near_base_to_palm_xy[1]), -0.18, 0.18)
+                move_near_dist = float(np.linalg.norm(move_target_pos[:2] - base_pos[:2]))
+                move_near_max_steps = max(move_near_steps, int(np.ceil(move_near_dist / max(base_speed, 1e-6))) + 10)
 
         elif phase == "move_near":
             if move_target_pos is None:
                 move_target_pos = base_pos.copy()
-            if near_obj_joint is not None:
-                near_obj_pos = get_object_pos_from_joint(env, near_obj_joint)
-                if near_obj_pos is not None:
-                    side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
-                    move_target_pos[0] = np.clip(float(near_obj_pos[0]), 0.02, 0.30)
-                    move_target_pos[1] = np.clip(float(near_obj_pos[1] + side_sign * place_offset), -0.18, 0.18)
+                palm_pos = get_palm_pos(env)
+                if palm_pos is not None:
+                    move_near_base_to_palm_xy = palm_pos[:2] - base_pos[:2]
+                else:
+                    move_near_base_to_palm_xy = np.zeros(2, dtype=np.float64)
+                if near_obj_joint is not None:
+                    near_obj_pos = get_object_pos_from_joint(env, near_obj_joint)
+                    if near_obj_pos is not None:
+                        desired_palm_x = float(near_obj_pos[0] - near_bias_xy[0])
+                        side_sign = -1.0 if float(base_pos[1] - near_obj_pos[1]) >= 0.0 else 1.0
+                        desired_palm_y = float(near_obj_pos[1] + side_sign * place_offset - near_bias_xy[1])
+                        move_target_pos[0] = np.clip(desired_palm_x - float(move_near_base_to_palm_xy[0]), 0.02, 0.30)
+                        move_target_pos[1] = np.clip(desired_palm_y - float(move_near_base_to_palm_xy[1]), -0.18, 0.18)
+                move_near_dist = float(np.linalg.norm(move_target_pos[:2] - base_pos[:2]))
+                move_near_max_steps = max(move_near_steps, int(np.ceil(move_near_dist / max(base_speed, 1e-6))) + 10)
 
             target = move_target_pos.copy()
             action[0] = 0.0
@@ -693,7 +722,7 @@ def run_episode(
             action[2:] = 0.0
             move_near_progress += 1
             reached_xy = float(np.linalg.norm(base_pos[:2] - move_target_pos[:2])) <= 0.003
-            if reached_xy or move_near_progress >= move_near_steps:
+            if reached_xy or move_near_progress >= move_near_max_steps:
                 phase = "lower"
                 lower_progress = 0
                 lower_target_pos = move_target_pos.copy()
@@ -907,6 +936,12 @@ def run_episode(
 
 
     obj_z_end = float(get_object_pos_from_joint(env, obj_joint)[2])
+    near_xy_dist_end = float("nan")
+    if near_obj_joint is not None:
+        obj_end_pos = get_object_pos_from_joint(env, obj_joint)
+        near_end_pos = get_object_pos_from_joint(env, near_obj_joint)
+        if obj_end_pos is not None and near_end_pos is not None:
+            near_xy_dist_end = float(np.linalg.norm(obj_end_pos[:2] - near_end_pos[:2]))
     sticky_success = int(sticky_ever_attached)
     lifted = int(sticky_ever_attached)
 
@@ -923,6 +958,7 @@ def run_episode(
         "lift_success": lifted,
         "obj_z_start": obj_z_start,
         "obj_z_end": obj_z_end,
+        "near_xy_dist_end": near_xy_dist_end,
     }
 
     if capture_images and len(eye_view_seq) == len(actions):
@@ -937,7 +973,7 @@ def main():
     parser.add_argument("--task", type=str, default="Lift")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--control-freq", type=int, default=20)
     parser.add_argument(
         "--horizon",
@@ -965,6 +1001,8 @@ def main():
     parser.add_argument("--align-speed", type=float, default=0.008)
     parser.add_argument("--place-near-object", type=str, default=None, help="Move near this object before release")
     parser.add_argument("--place-offset", type=float, default=0.08, help="Lateral offset when moving near target object")
+    parser.add_argument("--near-bias-x", type=float, default=0.0, help="Bias compensation on near target x (meters)")
+    parser.add_argument("--near-bias-y", type=float, default=0.03, help="Bias compensation on near target y (meters)")
     parser.add_argument("--lift-height", type=float, default=0.18, help="Base z lift amount after grasp")
     parser.add_argument("--sticky-after-close", action="store_true", default=True)
     args = parser.parse_args()
@@ -1013,6 +1051,10 @@ def main():
     joint_candidates = {
         "milk": "milk_joint0",
         "can": "can_joint0",
+        "lemon": "lemon_joint0",
+        "bread": "bread_joint0",
+        "hammer": "hammer_joint0",
+        "potato": "potato_joint0",
     }
     valid_joints = {}
     for name, joint in joint_candidates.items():
@@ -1063,6 +1105,8 @@ def main():
                 sticky_after_close=args.sticky_after_close if hasattr(args, "sticky_after_close") else False,
                 place_near_object=args.place_near_object,
                 place_offset=args.place_offset,
+                near_bias_x=args.near_bias_x,
+                near_bias_y=args.near_bias_y,
                 lift_height=args.lift_height,
             )
 
@@ -1119,6 +1163,11 @@ def main():
 
             total_steps += int(ep_result["actions"].shape[0])
             successes += int(ep_result["sticky_success"])
+            if np.isfinite(ep_result["near_xy_dist_end"]):
+                print(
+                    f"Episode {ep + 1}: near_xy_dist_end={ep_result['near_xy_dist_end']:.4f} m "
+                    f"(bias_x={args.near_bias_x:.3f}, bias_y={args.near_bias_y:.3f})"
+                )
 
             if (ep + 1) % 10 == 0:
                 print(f"Episode {ep + 1}/{args.episodes}, success so far: {successes}/{ep + 1}")
