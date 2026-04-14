@@ -145,6 +145,16 @@ def get_eef_pos(obs, env):
     return np.zeros(3, dtype=np.float64)
 
 
+def get_palm_pos(env):
+    for name in ("robot0_right_center", "robot0_grip_site", "gripper0_grip_site"):
+        try:
+            site_id = env.sim.model.site_name2id(name)
+            return env.sim.data.site_xpos[site_id].copy()
+        except Exception:
+            continue
+    return None
+
+
 def get_hand_site_ids(env):
     names = [
         "robot0_right_center",
@@ -219,14 +229,14 @@ def export_episode_videos(hdf5_path, fps):
             if not group_name.startswith("episode_"):
                 continue
             grp = f[group_name]
-            for key in ("agentview_images", "sideview_images", "arm_eyeview_images", "eye_view_images"):
-                if key not in grp:
-                    continue
-                frames = np.asarray(grp[key])
-                mp4_name = f"{os.path.splitext(os.path.basename(hdf5_path))[0]}_{group_name}_{key}.mp4"
-                mp4_path = os.path.join(video_dir, mp4_name)
-                imageio.mimsave(mp4_path, frames, fps=fps)
-                exported.append(mp4_path)
+            key = "eye_view_images"
+            if key not in grp:
+                continue
+            frames = np.asarray(grp[key])
+            mp4_name = f"{os.path.splitext(os.path.basename(hdf5_path))[0]}_{group_name}_{key}.mp4"
+            mp4_path = os.path.join(video_dir, mp4_name)
+            imageio.mimsave(mp4_path, frames, fps=fps)
+            exported.append(mp4_path)
 
     return exported
 
@@ -239,16 +249,16 @@ def run_episode(
     max_steps=None,
     base_speed=0.002,
     capture_images=False,
-    image_views=None,
-    init_mode="random",
-    far_start_distance=3.0,
+    far_start_distance=2.5,
     far_align_distance=0.5,
     approach_turn_noise_amp=0.28,
-    approach_turn_noise_period=30,
+    approach_turn_noise_period=60,
     approach_turn_noise_steps=60,
+    approach_ry_rotate_deg=30.0,
+    yaw_comp_total_deg=90.0,
     pre_approach_speed=0.018,
-    turn_steps=320,
-    turn_angle=np.pi,
+    align_speed=0.008,
+    sticky_after_close=False,
     image_height=512,
     image_width=512,
 ):
@@ -265,6 +275,9 @@ def run_episode(
     arm_eye_drift_target = np.zeros(3, dtype=np.float64)
     arm_eye_target_refresh_steps = 32
     arm_eye_follow_alpha = 0.055
+    arm_eye_walk_bob_amp = 0.010
+    arm_eye_walk_bob_period_steps = 26
+    arm_eye_walk_bob_phase = float(rng.uniform(0.0, 2.0 * np.pi))
     if arm_eye_camera_name is not None:
         arm_eye_cam_id = env.sim.model.camera_name2id(arm_eye_camera_name)
         arm_eye_cam_base_pos = env.sim.model.cam_pos[arm_eye_cam_id].copy()
@@ -277,36 +290,30 @@ def run_episode(
         obj_initial_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     obj_upright_quat = np.array(obj_initial_quat, dtype=np.float64)
 
+    # Determine table top Z so the arm never clips below the surface.
+    try:
+        table_top_z = float(env.model.mujoco_arena.table_offset[2])
+    except Exception:
+        table_top_z = 0.8
+    base_z_floor = table_top_z + 0.05
+
     obj_random = obj_initial.copy()
     obj_random[0] = np.clip(obj_initial[0] + rng.uniform(-0.06, 0.06), 0.02, 0.28)
     obj_random[1] = np.clip(obj_initial[1] + rng.uniform(-0.08, 0.08), -0.14, 0.14)
     set_object_pos(env, obj_joint, obj_random, quat=obj_upright_quat)
 
-    desired_align_z = float(obj_random[2] - 0.035)
+    desired_align_z = max(float(obj_random[2] - 0.035), base_z_floor)
     sampled_base_z = desired_align_z + rng.uniform(-0.08, 0.25)
-    base_z_min = float(obj_random[2] + 0.12)
-    if init_mode == "turn_then_grasp":
-        sampled_base_z = desired_align_z + rng.uniform(0.10, 0.35)
-        base_z_min = float(obj_random[2] + 0.20)
-    if init_mode in ("far_approach", "far_then_turn"):
-        far_sign = 1.0
-        base_pos = np.array(
-            [
-                obj_random[0] + far_sign * abs(far_start_distance),
-                obj_random[1] + rng.uniform(-0.4, 0.4),
-                max(sampled_base_z, base_z_min),
-            ],
-            dtype=np.float64,
-        )
-    else:
-        base_pos = np.array(
-            [
-                obj_random[0] + rng.uniform(-0.35, 0.35),
-                obj_random[1] + rng.uniform(-0.35, 0.35),
-                max(sampled_base_z, base_z_min),
-            ],
-            dtype=np.float64,
-        )
+    base_z_min = max(float(obj_random[2] + 0.12), base_z_floor)
+    far_sign = 1.0
+    base_pos = np.array(
+        [
+            obj_random[0] + far_sign * abs(far_start_distance),
+            obj_random[1] + rng.uniform(-0.4, 0.4),
+            max(sampled_base_z, base_z_min),
+        ],
+        dtype=np.float64,
+    )
 
     set_base_pose(env, base_pos, base_quat)
     env.sim.forward()
@@ -315,9 +322,9 @@ def run_episode(
     front_sign = 1.0
 
     front_clearance = 0.10
-    pregrasp_clearance = 0.085
-    grasp_clearance = 0.055
-    target_y_offset = 0.05
+    pregrasp_clearance = 0.060
+    grasp_clearance = 0.020
+    target_y_offset = 0.03
 
     actions = []
     states = []
@@ -326,12 +333,7 @@ def run_episode(
     base_pos_seq = []
     base_delta_seq = []
     arm_rot_seq = []
-    agentview_seq = []
-    sideview_seq = []
     eye_view_seq = []
-
-    if image_views is None:
-        image_views = {"agentview", "sideview", "eye_view"}
 
     obj_z_start = float(obj_pos[2])
     desired_eef_z = float(get_eef_pos(obs, env)[2])
@@ -364,11 +366,14 @@ def run_episode(
         [env.sim.model.jnt_range[env.sim.model.joint_name2id(name)][1] for name in arm_rot_joint_names],
         dtype=np.float64,
     )
+    arm_ry_baseline = float(arm_rot_initial[1])
     yaw_dir = -front_sign
     yaw_margin = 0.01
     yaw_target = float((yaw_high - yaw_margin) if yaw_dir > 0 else (yaw_low + yaw_margin))
+    yaw_comp_total_rad = float(np.deg2rad(max(0.0, yaw_comp_total_deg)))
+    approach_ry_rotate_rad = float(np.deg2rad(max(0.0, approach_ry_rotate_deg)))
     arm_rot_target = clip_joint_targets(
-        arm_rot_initial + np.array([0.18, 0.14 * front_sign, 0.0], dtype=np.float64),
+        arm_rot_initial + np.array([0.18, 0.0, 0.0], dtype=np.float64),
         arm_rot_low,
         arm_rot_high,
     )
@@ -376,22 +381,16 @@ def run_episode(
     rotate_yaw_tol = 0.04
     rotate_ready_count = 0
     forward_push_steps = 16
-    forward_push_distance = 0.084
+    forward_push_distance = 0.130
     forward_push_step_size = forward_push_distance / max(1, forward_push_steps)
-    palm_center_tol = 0.018
+    forward_min_steps = 6
+    palm_center_tol = 0.010
     grasp_total_steps = 45
     hold_close_value = 0.42
     grasp_start_value = 0.18
     grasp_lock_steps = 16
 
-    if init_mode == "far_approach":
-        phase = "approach_far"
-    elif init_mode == "turn_then_grasp":
-        phase = "turn_prelude"
-    elif init_mode == "far_then_turn":
-        phase = "approach_far"
-    else:
-        phase = "align"
+    phase = "approach_far"
     rotate_progress = 0
     forward_progress = 0
     forward_anchor_pos = None
@@ -401,6 +400,10 @@ def run_episode(
     grasp_lock_progress = 0
     hold_progress = 0
     sticky_success = 0
+    sticky_attached = False
+    sticky_ever_attached = False
+    sticky_offset = np.zeros(3, dtype=np.float64)
+    arm_rot_hold_des = arm_rot_initial.copy()
     front_ready_count = 0
     rotate_anchor_x = None
     rotate_anchor_pos = None
@@ -409,18 +412,9 @@ def run_episode(
     front_latched = False
     align_contact_count = 0
     align_contact_retreat_steps = 5
-    align_phase_steps = 0
-    force_dedicated_align = (init_mode == "turn_then_grasp")
-    min_dedicated_align_steps = 20
     align_y_tol = 0.01
-    align_z_tol = 0.004
-    pre_turn_progress = 0
+    align_z_tol = 0.008
     approach_far_progress = 0
-    pre_turn_target = clip_joint_targets(
-        arm_rot_initial + np.array([0.0, 0.0, turn_angle], dtype=np.float64),
-        arm_rot_low,
-        arm_rot_high,
-    )
 
     step_limit = max_steps if max_steps is not None else 5000
 
@@ -466,48 +460,33 @@ def run_episode(
             target = staging_target
             action[0] = 0.0
             action[1] = 0.0
+            approach_alpha = min(1.0, approach_far_progress / max(1, int(approach_turn_noise_steps) - 1))
+            ry_walk = -approach_ry_rotate_rad * approach_alpha
             if approach_far_progress < max(0, int(approach_turn_noise_steps)):
-                theta = 2.0 * np.pi * (approach_far_progress / max(1, int(approach_turn_noise_period)))
-                rz_noise = float(approach_turn_noise_amp) * np.sin(theta)
+                # One "turn" is defined as: move to one side, then return to center.
+                # This is a half-sine profile over one period.
+                period = max(1, int(approach_turn_noise_period))
+                cycle_idx = int(approach_far_progress // period)
+                phase_alpha = (approach_far_progress % period) / period
+                side_sign = 1.0 if (cycle_idx % 2 == 0) else -1.0
+                rz_noise = float(approach_turn_noise_amp) * side_sign * np.sin(np.pi * phase_alpha)
                 arm_rot_phase_override = clip_joint_targets(
-                    arm_rot_initial + np.array([0.0, 0.0, rz_noise], dtype=np.float64),
+                    arm_rot_initial + np.array([0.0, ry_walk, rz_noise], dtype=np.float64),
+                    arm_rot_low,
+                    arm_rot_high,
+                )
+            else:
+                arm_rot_phase_override = clip_joint_targets(
+                    arm_rot_initial + np.array([0.0, ry_walk, 0.0], dtype=np.float64),
                     arm_rot_low,
                     arm_rot_high,
                 )
             approach_far_progress += 1
             dist_to_stage = float(np.linalg.norm(base_pos - staging_target))
             if dist_to_stage <= 0.05:
-                if init_mode == "far_then_turn":
-                    phase = "turn_prelude"
-                    pre_turn_progress = 0
-                else:
-                    phase = "align"
-
-        elif phase == "turn_prelude":
-            target = np.array([base_pos[0], base_pos[1], desired_align_z], dtype=np.float64)
-            action[0] = 0.0
-            action[1] = 0.0
-            pre_turn_progress += 1
-            turn_alpha = min(1.0, pre_turn_progress / max(1, turn_steps))
-            arm_rot_phase_override = interpolate_joint_targets(arm_rot_initial, pre_turn_target, turn_alpha)
-            if pre_turn_progress >= turn_steps:
-                # Keep trajectory continuous after turn prelude.
-                arm_rot_initial = pre_turn_target.copy()
-                arm_rot_target = clip_joint_targets(
-                    arm_rot_initial + np.array([0.18, 0.14 * front_sign, 0.0], dtype=np.float64),
-                    arm_rot_low,
-                    arm_rot_high,
-                )
-                # Force a dedicated post-turn align phase, instead of immediately rotating.
-                align_phase_steps = 0
-                front_ready_count = 0
-                align_contact_count = 0
-                front_latched = False
-                force_dedicated_align = True
                 phase = "align"
 
         elif phase == "align":
-            align_phase_steps += 1
             target = front_target
             action[0] = 0.0
             action[1] = 0.0
@@ -537,8 +516,6 @@ def run_episode(
                 front_ready_count = 0
 
             allow_rotate = front_ready_count >= 8
-            if force_dedicated_align and align_phase_steps < min_dedicated_align_steps:
-                allow_rotate = False
 
             if allow_rotate:
                 # Rebase rotate interpolation from current pose to avoid sudden reset.
@@ -547,7 +524,7 @@ def run_episode(
                     dtype=np.float64,
                 )
                 arm_rot_target = clip_joint_targets(
-                    arm_rot_initial + np.array([0.18, 0.14 * front_sign, 0.0], dtype=np.float64),
+                    arm_rot_initial + np.array([0.18, 0.0, 0.0], dtype=np.float64),
                     arm_rot_low,
                     arm_rot_high,
                 )
@@ -555,7 +532,6 @@ def run_episode(
                 rotate_progress = 0
                 rotate_anchor_x = float(base_pos[0])
                 rotate_anchor_pos = base_pos.copy()
-                force_dedicated_align = False
 
         elif phase == "rotate":
             if rotate_anchor_pos is None:
@@ -573,7 +549,7 @@ def run_episode(
                 phase = "forward"
                 forward_progress = 0
                 forward_anchor_pos = base_pos.copy()
-                prelift_y_target = float(base_pos[1])
+                prelift_y_target = float(0.7 * base_pos[1] + 0.3 * target_y_now_push)
                 forward_target_x = float(obj_now[0] + front_sign * grasp_clearance)
                 if front_sign > 0:
                     forward_target_x = min(forward_target_x, float(forward_anchor_pos[0] + forward_push_distance))
@@ -585,7 +561,9 @@ def run_episode(
             if forward_anchor_pos is None:
                 forward_anchor_pos = base_pos.copy()
             if prelift_y_target is None:
-                prelift_y_target = float(base_pos[1])
+                prelift_y_target = float(0.7 * base_pos[1] + 0.3 * target_y_now_push)
+            # Keep a small tracking on object's lateral position to avoid ending on one side.
+            prelift_y_target = float(0.95 * prelift_y_target + 0.05 * target_y_now_push)
             if forward_target_x is None:
                 forward_target_x = float(obj_now[0] + front_sign * grasp_clearance)
                 if front_sign > 0:
@@ -595,16 +573,18 @@ def run_episode(
             target = np.array([forward_target_x, prelift_y_target, base_pos[2]], dtype=np.float64)
             action[0] = 0.0
             action[1] = 0.0
+            forward_progress += 1
             palm_aligned = abs(float(obj_now[0]) - float(hand_center_x)) <= palm_center_tol
             near_forward_target = abs(base_pos[0] - forward_target_x) <= 0.0015
-            if robot_can_contact or palm_aligned:
+            ready_to_close = forward_progress >= forward_min_steps
+            if (robot_can_contact or palm_aligned) and ready_to_close:
                 target = np.array([base_pos[0], base_pos[1], desired_align_z], dtype=np.float64)
                 action[2:] = hold_close_value
+                prelift_y_target = float(base_pos[1])
                 phase = "grasp"
                 grasp_progress = 0
             else:
-                forward_progress += 1
-                if near_forward_target or forward_progress >= forward_push_steps:
+                if ready_to_close and (near_forward_target or forward_progress >= forward_push_steps):
                     phase = "grasp"
                     grasp_progress = 0
 
@@ -631,7 +611,6 @@ def run_episode(
             grasp_lock_progress += 1
             if grasp_lock_progress >= grasp_lock_steps:
                 phase = "hold"
-                sticky_success = 1
 
         else:
             target = grasp_target
@@ -645,10 +624,28 @@ def run_episode(
             obj_now_stable = get_object_pos_from_joint(env, obj_joint)
             set_object_pos(env, obj_joint, obj_now_stable, quat=obj_upright_quat)
 
+        # Sticky contact mechanism: track object relative to palm and enforce offset
+        if sticky_after_close:
+            palm_pos = get_palm_pos(env)
+            if palm_pos is not None:
+                finger_mean = float(np.mean(action[2:]))
+                obj_qpos_addr = env.sim.model.get_joint_qpos_addr(obj_joint)
+                obj_now_for_sticky = env.sim.data.qpos[obj_qpos_addr[0]:obj_qpos_addr[0] + 3].copy()
+                if sticky_attached and finger_mean < -0.4:
+                    sticky_attached = False
+                if (not sticky_attached) and phase in ("grasp_lock", "hold"):
+                    near_palm = np.linalg.norm(obj_now_for_sticky - palm_pos) < 0.05
+                    if robot_can_contact or near_palm:
+                        sticky_offset = obj_now_for_sticky - palm_pos
+                        sticky_attached = True
+                        sticky_ever_attached = True
+                if sticky_attached:
+                    set_object_pos(env, obj_joint, palm_pos + sticky_offset, quat=obj_upright_quat)
+
         # Height lock: compensate wrist-control-induced lifting by lowering base target z when needed
         eef_now = get_eef_pos(obs, env)
         z_err = float(eef_now[2] - desired_eef_z)
-        if z_err > 0.0:
+        if z_err > 0.0 and phase in ("rotate", "forward", "grasp", "grasp_lock", "hold"):
             target = target.copy()
             target[2] -= min(0.03, 1.2 * z_err)
 
@@ -661,6 +658,11 @@ def run_episode(
         # Explicit wrist yaw control with front-side hard gate:
         # rotate only after whole hand is in front side and no contact
         if phase == "rotate":
+            arm_ry_now = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr("robot0_arm_ry")])
+            ry_rotated = abs(arm_ry_now - arm_ry_baseline)
+            yaw_need = max(0.0, yaw_comp_total_rad - ry_rotated)
+            yaw_target_dynamic = float(np.clip(yaw_initial + yaw_dir * yaw_need, yaw_low + yaw_margin, yaw_high - yaw_margin))
+            yaw_target = yaw_target_dynamic
             if front_latched:
                 alpha = rotate_progress / max(1, rotate_total_steps)
                 yaw_des = (1.0 - alpha) * yaw_initial + alpha * yaw_target
@@ -680,23 +682,27 @@ def run_episode(
         elif phase in ("forward", "grasp", "grasp_lock", "hold"):
             arm_rot_des = arm_rot_target.copy()
         else:
-            arm_rot_des = arm_rot_initial.copy()
+            # Keep latest arm rotation through align so ry does not get reset.
+            arm_rot_des = arm_rot_hold_des.copy()
+        arm_rot_hold_des = arm_rot_des.copy()
 
         step_speed = base_speed
         if phase == "approach_far":
             # Approach speed is controlled independently from other phases.
             step_speed = max(1e-6, float(pre_approach_speed))
-        if phase == "forward":
+        elif phase == "align":
+            # Align speed is controlled independently from other phases.
+            step_speed = max(1e-6, float(align_speed))
+        elif phase == "forward":
             step_speed = forward_push_step_size
 
         if phase == "forward":
             next_base, base_delta = move_along_x_only(base_pos, forward_target_x, step_speed)
         elif phase in ("approach_far", "align", "rotate", "grasp", "grasp_lock"):
             next_base, base_delta = move_towards_xy_then_z(base_pos, target, step_speed)
-        elif phase in ("turn_prelude",):
-            next_base, base_delta = move_towards(base_pos, target, step_speed)
         else:
             next_base, base_delta = move_towards(base_pos, target, step_speed)
+        next_base[2] = max(next_base[2], base_z_floor)
         base_pos = next_base
 
         action[0] = float(pitch_initial)
@@ -747,26 +753,17 @@ def run_episode(
                     arm_eye_drift_target = rng.uniform(np.zeros(3, dtype=np.float64), arm_eye_drift_max_delta)
                 arm_eye_cam_offset += arm_eye_follow_alpha * (arm_eye_drift_target - arm_eye_cam_offset)
                 arm_eye_cam_offset = np.clip(arm_eye_cam_offset, 0.0, arm_eye_drift_max_delta)
-                env.sim.model.cam_pos[arm_eye_cam_id] = arm_eye_cam_base_pos + arm_eye_cam_offset
-            agent = None
-            side = None
+                walk_bob_z = 0.0
+                if phase == "approach_far":
+                    walk_bob_z = arm_eye_walk_bob_amp * np.sin(
+                        (2.0 * np.pi * t / max(1, arm_eye_walk_bob_period_steps)) + arm_eye_walk_bob_phase
+                    )
+                cam_pos = arm_eye_cam_base_pos + arm_eye_cam_offset
+                cam_pos[2] += walk_bob_z
+                env.sim.model.cam_pos[arm_eye_cam_id] = cam_pos
             arm_eye = None
-            if "agentview" in image_views:
-                agent = env.sim.render(height=image_height, width=image_width, camera_name="agentview")
-            if "sideview" in image_views:
-                side = env.sim.render(height=image_height, width=image_width, camera_name="sideview")
-            if "eye_view" in image_views and arm_eye_camera_name is not None:
+            if arm_eye_camera_name is not None:
                 arm_eye = env.sim.render(height=image_height, width=image_width, camera_name=arm_eye_camera_name)
-            if agent is not None:
-                if agent.ndim == 3 and agent.shape[2] >= 3:
-                    agent = agent[:, :, :3]
-                agent = agent[::-1]
-                agentview_seq.append(np.asarray(agent, dtype=np.uint8))
-            if side is not None:
-                if side.ndim == 3 and side.shape[2] >= 3:
-                    side = side[:, :, :3]
-                side = side[::-1]
-                sideview_seq.append(np.asarray(side, dtype=np.uint8))
             if arm_eye is not None:
                 if arm_eye.ndim == 3 and arm_eye.shape[2] >= 3:
                     arm_eye = arm_eye[:, :, :3]
@@ -778,7 +775,8 @@ def run_episode(
 
 
     obj_z_end = float(get_object_pos_from_joint(env, obj_joint)[2])
-    lifted = int(sticky_success)
+    sticky_success = int(sticky_ever_attached)
+    lifted = int(sticky_ever_attached)
 
     result = {
         "actions": np.asarray(actions),
@@ -789,21 +787,15 @@ def run_episode(
         "base_delta": np.asarray(base_delta_seq, dtype=np.float32),
         "arm_rot": np.asarray(arm_rot_seq, dtype=np.float32),
         "chosen_object": chosen_obj,
-        "sticky_success": int(sticky_success),
+        "sticky_success": sticky_success,
         "lift_success": lifted,
         "obj_z_start": obj_z_start,
         "obj_z_end": obj_z_end,
     }
 
-    if capture_images and len(agentview_seq) == len(actions):
-        result["agentview_images"] = np.asarray(agentview_seq, dtype=np.uint8)
-    if capture_images and len(sideview_seq) == len(actions):
-        result["sideview_images"] = np.asarray(sideview_seq, dtype=np.uint8)
     if capture_images and len(eye_view_seq) == len(actions):
         eye_view_arr = np.asarray(eye_view_seq, dtype=np.uint8)
         result["eye_view_images"] = eye_view_arr
-        # Backward-compatible alias for older readers.
-        result["arm_eyeview_images"] = eye_view_arr
 
     return result
 
@@ -811,7 +803,7 @@ def run_episode(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="Lift")
-    parser.add_argument("--episodes", type=int, default=100)
+    parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--control-freq", type=int, default=20)
@@ -828,42 +820,21 @@ def main():
     parser.add_argument(
         "--export-video",
         action="store_true",
-        default=False
+        default=True
     )
-    parser.add_argument(
-        "--image-views",
-        type=str,
-        default="agentview,sideview,eye_view",
-        help="Comma-separated subset of: agentview,sideview,eye_view. Use 'none' to disable image capture.",
-    )
-    parser.add_argument(
-        "--init-mode",
-        type=str,
-        default="random",
-        choices=["random", "far_approach", "turn_then_grasp", "far_then_turn"],
-        help="Special start style: random, far approach, turn then grasp, or far then turn.",
-    )
-    parser.add_argument("--far-start-distance", type=float, default=3.0)
+    parser.add_argument("--far-start-distance", type=float, default=2.5)
     parser.add_argument("--far-align-distance", type=float, default=0.5)
     parser.add_argument("--approach-turn-noise-amp", type=float, default=0.28)
-    parser.add_argument("--approach-turn-noise-period", type=int, default=30)
+    parser.add_argument("--approach-turn-noise-period", type=int, default=60)
     parser.add_argument("--approach-turn-noise-steps", type=int, default=60)
+    parser.add_argument("--approach-ry-rotate-deg", type=float, default=30.0)
+    parser.add_argument("--yaw-comp-total-deg", type=float, default=90.0)
     parser.add_argument("--pre-approach-speed", type=float, default=0.018)
-    parser.add_argument("--turn-steps", type=int, default=320)
-    parser.add_argument("--turn-angle", type=float, default=3.1416)
+    parser.add_argument("--align-speed", type=float, default=0.008)
+    parser.add_argument("--sticky-after-close", action="store_true", default=True)
     args = parser.parse_args()
     is_episode_output = args.output_format == "episode"
-
-    view_tokens = [v.strip().lower() for v in args.image_views.split(",") if v.strip()]
-    if "none" in view_tokens:
-        image_views = set()
-    else:
-        valid_views = {"agentview", "sideview", "eye_view"}
-        unknown = [v for v in view_tokens if v not in valid_views]
-        if unknown:
-            raise ValueError(f"Unknown --image-views entries: {unknown}. Valid values are agentview,sideview,eye_view,none")
-        image_views = set(view_tokens)
-    capture_images = len(image_views) > 0
+    capture_images = True
 
     os.makedirs("hannes_demonstrations", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -945,16 +916,16 @@ def main():
                 valid_joints,
                 max_steps=args.horizon,
                 capture_images=bool(capture_images),
-                image_views=image_views,
-                init_mode=args.init_mode,
                 far_start_distance=args.far_start_distance,
                 far_align_distance=args.far_align_distance,
                 approach_turn_noise_amp=args.approach_turn_noise_amp,
                 approach_turn_noise_period=args.approach_turn_noise_period,
                 approach_turn_noise_steps=args.approach_turn_noise_steps,
+                approach_ry_rotate_deg=args.approach_ry_rotate_deg if hasattr(args, "approach_ry_rotate_deg") else 30.0,
+                yaw_comp_total_deg=args.yaw_comp_total_deg if hasattr(args, "yaw_comp_total_deg") else 90.0,
                 pre_approach_speed=args.pre_approach_speed,
-                turn_steps=args.turn_steps,
-                turn_angle=args.turn_angle,
+                align_speed=args.align_speed if hasattr(args, "align_speed") else 0.008,
+                sticky_after_close=args.sticky_after_close if hasattr(args, "sticky_after_close") else False,
             )
 
             if args.output_format == "autocruise":
@@ -967,10 +938,6 @@ def main():
                 grp.create_dataset("base_pos", data=ep_result["base_pos"], compression="gzip")
                 grp.create_dataset("base_delta", data=ep_result["base_delta"], compression="gzip")
                 grp.create_dataset("arm_rot", data=ep_result["arm_rot"], compression="gzip")
-                if "agentview_images" in ep_result:
-                    grp.create_dataset("agentview_images", data=ep_result["agentview_images"], compression="gzip")
-                if "sideview_images" in ep_result:
-                    grp.create_dataset("sideview_images", data=ep_result["sideview_images"], compression="gzip")
                 if "eye_view_images" in ep_result:
                     grp.create_dataset("eye_view_images", data=ep_result["eye_view_images"], compression="gzip")
             else:
@@ -983,10 +950,6 @@ def main():
                 grp.create_dataset("base_pos", data=ep_result["base_pos"], compression="gzip")
                 grp.create_dataset("base_delta", data=ep_result["base_delta"], compression="gzip")
                 grp.create_dataset("arm_rot", data=ep_result["arm_rot"], compression="gzip")
-                if "agentview_images" in ep_result:
-                    grp.create_dataset("agentview_images", data=ep_result["agentview_images"], compression="gzip")
-                if "sideview_images" in ep_result:
-                    grp.create_dataset("sideview_images", data=ep_result["sideview_images"], compression="gzip")
                 if "eye_view_images" in ep_result:
                     grp.create_dataset("eye_view_images", data=ep_result["eye_view_images"], compression="gzip")
 
