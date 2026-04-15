@@ -22,7 +22,7 @@ class HannesHDF5Layout:
 
     image_keys: Dict[str, str] = dataclasses.field(
         default_factory=lambda: {
-            "image": "episode_0/agentview_images",
+            "image": "episode_0/agent_view_images",
         }
     )
     prompt_key: Optional[str] = None

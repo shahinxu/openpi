@@ -1,0 +1,20 @@
+dataset:
+  manifest: adt_pipeline_data/processed/manifest.json
+  split_group_key: sequence
+
+split:
+  train_ratio: 0.9
+  val_ratio: 0.1
+  seed: 42
+
+window:
+  span: 32
+  num_frames: 2
+  stride: 4
+  image_size: 224
+
+loader:
+  batch_size: 32
+  num_workers: 4
+  persistent_workers: true
+  prefetch_factor: 4

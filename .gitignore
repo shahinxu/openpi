@@ -172,3 +172,5 @@ cython_debug/
 *.jsonl
 *.json
 *.png
+*.npz
+*.zip
