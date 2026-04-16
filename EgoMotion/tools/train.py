@@ -188,12 +188,9 @@ def main() -> None:
 		LossConfig(
 			lambda_trunk=float(loss_block.get("lambda_trunk", 1.0)),
 			lambda_skeleton=float(loss_block.get("lambda_skeleton", 1.0)),
-			lambda_occupancy=float(loss_block.get("lambda_occupancy", 2.0)),
+			lambda_occupancy=float(loss_block.get("lambda_occupancy", 0.0)),
 			occupancy_pos_weight_clip_min=float(loss_block.get("occupancy_pos_weight_clip_min", 1.0)),
 			occupancy_pos_weight_clip_max=float(loss_block.get("occupancy_pos_weight_clip_max", 200.0)),
-			normalize_components=bool(loss_block.get("normalize_components", True)),
-			norm_ema_decay=float(loss_block.get("norm_ema_decay", 0.99)),
-			norm_eps=float(loss_block.get("norm_eps", 1e-6)),
 		)
 	)
 
