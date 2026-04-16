@@ -10,7 +10,6 @@ from openpi.models import model as _model
 from openpi.shared import array_typing as at
 
 
-@at.typecheck
 @struct.dataclass
 class TrainState:
     step: at.Int[at.ArrayLike, ""]

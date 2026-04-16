@@ -8,8 +8,7 @@ split:
   seed: 42
 
 window:
-  span: 32
-  num_frames: 2
+  span: 16
   stride: 4
   image_size: 224
 

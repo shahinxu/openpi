@@ -51,14 +51,12 @@ def main() -> None:
 	window_cfg = data_cfg.get("window", {})
 	loader_cfg = data_cfg.get("loader", {})
 	window_span = int(window_cfg.get("span", window_cfg.get("size", 16)))
-	num_frames = int(window_cfg.get("num_frames", window_span))
 	dm_cfg = DataModuleConfig(
 		train_manifest="",
 		val_manifest=str(data_cfg.get("dataset", {}).get("val_manifest", "outputs/splits/val_manifest.json")),
 		batch_size=int(loader_cfg.get("batch_size", 8)),
 		num_workers=int(loader_cfg.get("num_workers", 4)),
 		window_span=window_span,
-		num_frames=num_frames,
 		stride=int(window_cfg.get("stride", 1)),
 		image_size=int(window_cfg.get("image_size", 224)),
 	)

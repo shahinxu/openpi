@@ -10,6 +10,7 @@ set -euo pipefail
 #   PRECOMPUTE_OUT_DIR=outputs/precompute_cache
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6}"
 MANIFEST="${MANIFEST:-adt_pipeline_data/processed/manifest.json}"
 PRECOMPUTE_OUT_DIR="${PRECOMPUTE_OUT_DIR:-outputs/precompute_cache}"
 MODEL_CONFIG="configs/model.yaml"
@@ -22,7 +23,7 @@ cd "$ROOT_DIR"
 mkdir -p outputs logs checkpoints
 
 echo "[run_train] mode=full"
-"$PYTHON_BIN" tools/train.py \
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$PYTHON_BIN" tools/train.py \
   --manifest "$MANIFEST" \
   --data-config "$FULL_DATA_CONFIG" \
   --model-config "$MODEL_CONFIG" \

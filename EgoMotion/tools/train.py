@@ -145,14 +145,12 @@ def main() -> None:
 	window_cfg = data_cfg.get("window", {})
 	loader_cfg = data_cfg.get("loader", {})
 	window_span = int(window_cfg.get("span", window_cfg.get("size", 16)))
-	num_frames = int(window_cfg.get("num_frames", window_span))
 	dm_cfg = DataModuleConfig(
 		train_manifest=split_paths["train"],
 		val_manifest=split_paths["val"],
 		batch_size=int(loader_cfg.get("batch_size", 8)),
 		num_workers=int(loader_cfg.get("num_workers", 4)),
 		window_span=window_span,
-		num_frames=num_frames,
 		stride=int(window_cfg.get("stride", 1)),
 		image_size=int(window_cfg.get("image_size", 224)),
 		persistent_workers=bool(loader_cfg.get("persistent_workers", True)),
@@ -193,6 +191,9 @@ def main() -> None:
 			lambda_occupancy=float(loss_block.get("lambda_occupancy", 2.0)),
 			occupancy_pos_weight_clip_min=float(loss_block.get("occupancy_pos_weight_clip_min", 1.0)),
 			occupancy_pos_weight_clip_max=float(loss_block.get("occupancy_pos_weight_clip_max", 200.0)),
+			normalize_components=bool(loss_block.get("normalize_components", True)),
+			norm_ema_decay=float(loss_block.get("norm_ema_decay", 0.99)),
+			norm_eps=float(loss_block.get("norm_eps", 1e-6)),
 		)
 	)
 

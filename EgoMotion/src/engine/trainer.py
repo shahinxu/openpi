@@ -99,7 +99,7 @@ class Trainer:
             }
 
             preds = self.model(video)
-            loss, stats = self.loss_fn.compute(preds, targets)
+            loss, stats = self.loss_fn.compute(preds, targets, update_state=True)
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -157,7 +157,7 @@ class Trainer:
                 }
 
                 preds = self.model(video)
-                loss, stats = self.loss_fn.compute(preds, targets)
+                loss, stats = self.loss_fn.compute(preds, targets, update_state=False)
                 total_loss += float(loss.detach().cpu().item())
                 total_trunk += float(stats.get("loss_trunk", 0.0))
                 total_skeleton += float(stats.get("loss_skeleton", 0.0))
