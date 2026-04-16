@@ -17,3 +17,18 @@ loader:
   num_workers: 4
   persistent_workers: true
   prefetch_factor: 4
+
+# Data augmentation (applied only to training set)
+augmentation:
+  enable: true              # Set to true to enable augmentation
+  augment_prob: 0.8          # Probability to apply augmentation to each batch
+  color_jitter: true         # ColorJitter: random brightness/contrast/saturation/hue
+  color_jitter_brightness: 0.2
+  color_jitter_contrast: 0.2
+  color_jitter_saturation: 0.1
+  color_jitter_hue: 0.05
+  gaussian_blur: true        # GaussianBlur: blur frames with random sigma
+  gaussian_blur_kernel: 3
+  random_erasing: true       # RandomErasing: randomly erase rectangular regions
+  random_erasing_scale: [0.02, 0.1]
+  random_erasing_prob: 0.3

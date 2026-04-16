@@ -42,6 +42,17 @@ class Trainer:
         self.datamodule.setup()
         os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
 
+        # Baseline validation before any training updates.
+        init_val_metrics = self.validate_one_epoch(epoch_idx=-1)
+        print(
+            f"epoch=0/{self.cfg.epochs} "
+            f"val_loss={init_val_metrics.get('val_loss', 0.0):.6f} "
+            f"val_trunk={init_val_metrics.get('val_loss_trunk', 0.0):.6f} "
+            f"val_skeleton={init_val_metrics.get('val_loss_skeleton', 0.0):.6f} "
+            f"val_occupancy={init_val_metrics.get('val_loss_occupancy', 0.0):.6f} "
+            f"note=pretrain_baseline"
+        )
+
         for epoch_idx in range(self.cfg.epochs):
             train_metrics = self.train_one_epoch(epoch_idx)
             val_metrics = self.validate_one_epoch(epoch_idx)

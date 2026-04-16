@@ -146,6 +146,7 @@ def main() -> None:
 
 	window_cfg = data_cfg.get("window", {})
 	loader_cfg = data_cfg.get("loader", {})
+	augment_cfg = data_cfg.get("augmentation", {})
 	window_span = int(window_cfg.get("span", window_cfg.get("size", 16)))
 	dm_cfg = DataModuleConfig(
 		train_manifest=split_paths["train"],
@@ -157,6 +158,18 @@ def main() -> None:
 		image_size=int(window_cfg.get("image_size", 224)),
 		persistent_workers=bool(loader_cfg.get("persistent_workers", True)),
 		prefetch_factor=int(loader_cfg.get("prefetch_factor", 2)),
+		enable_augmentation=bool(augment_cfg.get("enable", False)),
+		augment_prob=float(augment_cfg.get("augment_prob", 0.8)),
+		color_jitter=bool(augment_cfg.get("color_jitter", True)),
+		color_jitter_brightness=float(augment_cfg.get("color_jitter_brightness", 0.2)),
+		color_jitter_contrast=float(augment_cfg.get("color_jitter_contrast", 0.2)),
+		color_jitter_saturation=float(augment_cfg.get("color_jitter_saturation", 0.1)),
+		color_jitter_hue=float(augment_cfg.get("color_jitter_hue", 0.05)),
+		gaussian_blur=bool(augment_cfg.get("gaussian_blur", True)),
+		gaussian_blur_kernel=int(augment_cfg.get("gaussian_blur_kernel", 3)),
+		random_erasing=bool(augment_cfg.get("random_erasing", True)),
+		random_erasing_scale=list(augment_cfg.get("random_erasing_scale", [0.02, 0.1])),
+		random_erasing_prob=float(augment_cfg.get("random_erasing_prob", 0.3)),
 	)
 	_log_stage("constructing datamodule")
 	datamodule = ThreeDecoderDataModule(dm_cfg)

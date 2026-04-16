@@ -11,7 +11,7 @@ trainer:
 
 loss:
   lambda_trunk: 1.0
-  lambda_skeleton: 1.0
+  lambda_skeleton: 0.0
   lambda_occupancy: 0.0
   occupancy_pos_weight_clip_min: 1.0
   occupancy_pos_weight_clip_max: 200.0
