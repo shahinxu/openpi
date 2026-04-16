@@ -10,7 +10,7 @@ set -euo pipefail
 #   PRECOMPUTE_OUT_DIR=outputs/precompute_cache
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 MANIFEST="${MANIFEST:-adt_pipeline_data/processed/manifest.json}"
 PRECOMPUTE_OUT_DIR="${PRECOMPUTE_OUT_DIR:-outputs/precompute_cache}"
 MODEL_CONFIG="configs/model.yaml"

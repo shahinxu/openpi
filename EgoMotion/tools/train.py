@@ -87,7 +87,9 @@ def _set_seed(seed: int) -> None:
 	random.seed(seed)
 	np.random.seed(seed)
 	torch.manual_seed(seed)
-	if torch.cuda.is_available():
+	# Avoid eager CUDA probing at startup, which can hang on some driver/runtime setups.
+	# Set TRAIN_ENABLE_CUDA_SEED=1 to opt in when CUDA init is known healthy.
+	if os.environ.get("TRAIN_ENABLE_CUDA_SEED", "0") == "1":
 		torch.cuda.manual_seed_all(seed)
 
 
