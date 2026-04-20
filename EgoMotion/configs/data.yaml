@@ -32,3 +32,11 @@ augmentation:
   random_erasing: true       # RandomErasing: randomly erase rectangular regions
   random_erasing_scale: [0.02, 0.1]
   random_erasing_prob: 0.3
+
+# Motion-centric representation for encoder input
+# mode: none | frame_diff | abs_frame_diff | sparse_flow | sobel
+motion_feature:
+  mode: sparse_flow
+  sparse_flow_max_corners: 200
+  sparse_flow_quality_level: 0.01
+  sparse_flow_min_distance: 7.0

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.models import ResNet18_Weights, ResNet34_Weights, resnet18, resnet34
 
 
 @dataclass
@@ -25,16 +25,23 @@ class VideoEncoder(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        if cfg.backbone != "resnet18":
+        if cfg.backbone == "resnet18":
+            weights = ResNet18_Weights.DEFAULT if cfg.pretrained else None
+            backbone = resnet18(weights=weights)
+            backbone_out_dim = 512
+        elif cfg.backbone == "resnet34":
+            weights = ResNet34_Weights.DEFAULT if cfg.pretrained else None
+            backbone = resnet34(weights=weights)
+            backbone_out_dim = 512
+        else:
             raise ValueError(f"Unsupported backbone: {cfg.backbone}")
-        weights = ResNet18_Weights.DEFAULT if cfg.pretrained else None
-        backbone = resnet18(weights=weights)
+
         self.backbone = nn.Sequential(*list(backbone.children())[:-1])  # [B, 512, 1, 1]
         if cfg.freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
-        self.frame_proj = nn.Linear(512, cfg.latent_dim)
+        self.frame_proj = nn.Linear(backbone_out_dim, cfg.latent_dim)
         self.motion_proj = nn.Sequential(
             nn.Linear(cfg.latent_dim, cfg.latent_dim),
             nn.GELU(),
@@ -64,7 +71,7 @@ class VideoEncoder(nn.Module):
 
         b, t, c, h, w = x.shape
         frames = x.reshape(b * t, c, h, w)
-        feat = self.backbone(frames).reshape(b * t, 512)
+        feat = self.backbone(frames).reshape(b * t, -1)
         feat = self.frame_proj(feat).reshape(b, t, self.cfg.latent_dim)
 
         if self.cfg.use_motion_branch:

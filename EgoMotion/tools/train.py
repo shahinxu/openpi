@@ -147,6 +147,7 @@ def main() -> None:
 	window_cfg = data_cfg.get("window", {})
 	loader_cfg = data_cfg.get("loader", {})
 	augment_cfg = data_cfg.get("augmentation", {})
+	motion_feature_cfg = data_cfg.get("motion_feature", {})
 	window_span = int(window_cfg.get("span", window_cfg.get("size", 16)))
 	dm_cfg = DataModuleConfig(
 		train_manifest=split_paths["train"],
@@ -170,6 +171,10 @@ def main() -> None:
 		random_erasing=bool(augment_cfg.get("random_erasing", True)),
 		random_erasing_scale=list(augment_cfg.get("random_erasing_scale", [0.02, 0.1])),
 		random_erasing_prob=float(augment_cfg.get("random_erasing_prob", 0.3)),
+		motion_feature_mode=str(motion_feature_cfg.get("mode", "none")),
+		sparse_flow_max_corners=int(motion_feature_cfg.get("sparse_flow_max_corners", 200)),
+		sparse_flow_quality_level=float(motion_feature_cfg.get("sparse_flow_quality_level", 0.01)),
+		sparse_flow_min_distance=float(motion_feature_cfg.get("sparse_flow_min_distance", 7.0)),
 	)
 	_log_stage("constructing datamodule")
 	datamodule = ThreeDecoderDataModule(dm_cfg)

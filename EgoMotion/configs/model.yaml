@@ -1,6 +1,6 @@
 model:
   latent_dim: 256
-  backbone: resnet34
+  backbone: resnet18
   temporal_layers: 4
   temporal_heads: 8
   dropout: 0.1
