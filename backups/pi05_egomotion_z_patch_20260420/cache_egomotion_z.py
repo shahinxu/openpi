@@ -1,17 +1,3 @@
-#!/usr/bin/env python
-"""Offline z_t caching: run frozen EgoMotion encoder on HDF5 episode datasets.
-
-For each HDF5 file, reads episode images, builds 16-frame sliding windows for
-every timestep (with earliest-frame left-padding), runs the frozen encoder in
-batch, and saves a [T, 256] float32 .npy file alongside the original HDF5.
-
-Usage (from workspace root):
-    conda activate openpi311
-    python backups/pi05_egomotion_z_patch_20260420/cache_egomotion_z.py
-
-Default behaviour processes dataset_auto_grip_5/ and dataset_auto_grip_6/.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -33,12 +19,13 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[2]  # -> openpi/
 sys.path.insert(0, str(WORKSPACE_ROOT / "EgoMotion"))
 
 from src.models.encoder import EncoderConfig, VideoEncoder  # noqa: E402
+from src.data.motion_features import apply_motion_feature  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+MOTION_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+MOTION_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
 SPAN = 16  # 16-frame window expected by VideoEncoder
 IMAGE_SIZE = 224
 ENCODER_CKPT = str(WORKSPACE_ROOT / "EgoMotion" / "checkpoints" / "best_encoder.pt")
@@ -68,22 +55,21 @@ def _find_image_key(episode_group: h5py.Group) -> str:
 
 
 def _preprocess_images(images: np.ndarray) -> np.ndarray:
-    """Resize & normalise a batch of uint8 RGB images.
+    """Resize uint8 RGB images to 224x224 and return [0,1] float32.
+
+    Normalisation is deferred to per-window level because sparse_flow
+    needs access to consecutive frames.
 
     Args:
         images: [N, H_orig, W_orig, 3] uint8
 
     Returns:
-        [N, 3, 224, 224] float32 (ImageNet-normalised)
+        [N, H, W, 3] float32 in [0, 1] (NOT yet normalised / transposed)
     """
     out = np.empty((len(images), IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.float32)
     for i, img in enumerate(images):
         resized = cv2.resize(img, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
         out[i] = resized.astype(np.float32) / 255.0
-    # Normalise
-    out = (out - IMAGENET_MEAN) / IMAGENET_STD
-    # HWC -> CHW
-    out = out.transpose(0, 3, 1, 2)  # [N, 3, 224, 224]
     return out
 
 
@@ -118,30 +104,57 @@ def _load_encoder(ckpt_path: str, device: torch.device) -> VideoEncoder:
     return encoder
 
 
+def _apply_motion_and_normalize(window: np.ndarray, motion_mode: str) -> np.ndarray:
+    """Apply motion feature extraction and normalise a single window.
+
+    Args:
+        window: [SPAN, H, W, 3] float32 in [0, 1]
+        motion_mode: "sparse_flow", "frame_diff", "abs_frame_diff", "sobel", or "none"
+
+    Returns:
+        [SPAN, 3, H, W] float32, normalised and transposed to CHW.
+    """
+    # apply_motion_feature expects [T, H, W, 3] float32 in [0, 1]
+    clip = apply_motion_feature(window, mode=motion_mode)
+    # Normalise: motion modes use 0.5/0.5, rgb uses ImageNet
+    if motion_mode in ("none", "rgb", "off"):
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    else:
+        mean = MOTION_MEAN
+        std = MOTION_STD
+    clip = (clip - mean) / std
+    # HWC -> CHW
+    return clip.transpose(0, 3, 1, 2)  # [SPAN, 3, H, W]
+
+
 @torch.no_grad()
 def _encode_episode(
     encoder: VideoEncoder,
-    images_preprocessed: np.ndarray,
+    images_01: np.ndarray,
     device: torch.device,
     batch_size: int,
+    motion_mode: str = "sparse_flow",
 ) -> np.ndarray:
     """Run encoder on all 16-frame windows for one episode.
 
     Args:
-        images_preprocessed: [T, 3, 224, 224] float32 (already normalised).
+        images_01: [T, H, W, 3] float32 in [0, 1] (resized, NOT normalised).
         batch_size: Number of windows to forward in parallel.
+        motion_mode: Motion feature mode matching EgoMotion training config.
 
     Returns:
         [T, 256] float32 numpy array.
     """
-    T = len(images_preprocessed)
+    T = len(images_01)
     z_all = np.empty((T, 256), dtype=np.float32)
 
     for batch_start in range(0, T, batch_size):
         batch_end = min(batch_start + batch_size, T)
         windows = []
         for t in range(batch_start, batch_end):
-            win = _build_window(images_preprocessed, t, SPAN)  # [16, 3, 224, 224]
+            win = _build_window(images_01, t, SPAN)  # [16, H, W, 3] float32 [0,1]
+            win = _apply_motion_and_normalize(win, motion_mode)  # [16, 3, H, W]
             windows.append(win)
         # [B, 16, 3, 224, 224]
         batch_tensor = torch.from_numpy(np.stack(windows, axis=0)).to(device)
@@ -176,6 +189,7 @@ def process_file(
     batch_size: int,
     output_dir: str | None,
     overwrite: bool,
+    motion_mode: str = "sparse_flow",
 ) -> bool:
     """Process one HDF5 file.  Returns True if z_t was written."""
     npy_path = _output_path(hdf5_path, output_dir)
@@ -187,8 +201,8 @@ def process_file(
         img_key = _find_image_key(ep)
         images_raw = ep[img_key][:]  # [T, H, W, 3] uint8
 
-    images_pp = _preprocess_images(images_raw)  # [T, 3, 224, 224]
-    z_t = _encode_episode(encoder, images_pp, device, batch_size)  # [T, 256]
+    images_01 = _preprocess_images(images_raw)  # [T, H, W, 3] float32 [0,1]
+    z_t = _encode_episode(encoder, images_01, device, batch_size, motion_mode)  # [T, 256]
 
     os.makedirs(os.path.dirname(npy_path) or ".", exist_ok=True)
     np.save(npy_path, z_t)
@@ -217,6 +231,12 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--overwrite", action="store_true", help="Re-compute even if .npy exists")
+    parser.add_argument(
+        "--motion-mode",
+        default="sparse_flow",
+        choices=["none", "sparse_flow", "frame_diff", "abs_frame_diff", "sobel"],
+        help="Motion feature mode (must match EgoMotion training config). Default: sparse_flow",
+    )
     args = parser.parse_args()
 
     # Collect all HDF5 files
@@ -234,6 +254,7 @@ def main() -> None:
     print(f"Found {len(hdf5_files)} HDF5 files across {len(args.dirs)} directories.")
     print(f"Encoder checkpoint: {args.encoder_ckpt}")
     print(f"Device: {args.device}  |  Batch size: {args.batch_size}")
+    print(f"Motion mode: {args.motion_mode}")
     print(f"Output: {'alongside HDF5' if args.output_dir is None else args.output_dir}")
     print()
 
@@ -247,7 +268,7 @@ def main() -> None:
     for i, path in enumerate(hdf5_files, 1):
         name = os.path.basename(path)
         try:
-            did_write = process_file(path, encoder, device, args.batch_size, args.output_dir, args.overwrite)
+            did_write = process_file(path, encoder, device, args.batch_size, args.output_dir, args.overwrite, args.motion_mode)
             if did_write:
                 written += 1
                 elapsed = time.time() - t0
