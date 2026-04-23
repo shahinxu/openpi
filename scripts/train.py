@@ -73,11 +73,27 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
     loaded_params = loader.load(params_shape)
-    at.check_pytree_equality(expected=params_shape, got=loaded_params, check_shapes=True, check_dtypes=True)
+
+    # Allow the model to have extra params not present in the checkpoint (e.g. newly added
+    # layers like egomotion_proj). Only validate params that are actually present in the
+    # loaded checkpoint.
+    flat_expected = traverse_util.flatten_dict(params_shape)
+    flat_loaded = traverse_util.flatten_dict(loaded_params)
+    extra_keys = set(flat_expected.keys()) - set(flat_loaded.keys())
+    if extra_keys:
+        import logging as _logging
+        _logging.getLogger("openpi").info(
+            "Checkpoint is missing %d param(s) — will be randomly initialized: %s",
+            len(extra_keys),
+            sorted("/".join(k) for k in extra_keys),
+        )
+    # Build a filtered params_shape containing only keys present in loaded_params.
+    filtered_shape = traverse_util.unflatten_dict({k: v for k, v in flat_expected.items() if k in flat_loaded})
+    at.check_pytree_equality(expected=filtered_shape, got=loaded_params, check_shapes=True, check_dtypes=True)
 
     # Remove jax.ShapeDtypeStruct from the loaded params. This makes sure that only the loaded params are returned.
     return traverse_util.unflatten_dict(
-        {k: v for k, v in traverse_util.flatten_dict(loaded_params).items() if not isinstance(v, jax.ShapeDtypeStruct)}
+        {k: v for k, v in flat_loaded.items() if not isinstance(v, jax.ShapeDtypeStruct)}
     )
 
 

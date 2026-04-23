@@ -159,21 +159,31 @@ class FakeDataConfig(DataConfigFactory):
 class HannesDataConfig(DataConfigFactory):
 
     extra_delta_transform: bool = False
+    use_egomotion_z: bool = False
+    raw_dir: str | None = None
 
     @override
     def create(
         self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
     ) -> DataConfig:
+        pre_repack: list[_transforms.DataTransformFn] = []
+        if self.use_egomotion_z:
+            if self.raw_dir is None:
+                raise ValueError("raw_dir must be set when use_egomotion_z=True")
+            pre_repack.append(_transforms.EgoMotionZTransform(raw_dir=self.raw_dir))
+
+        repack_structure: dict = {
+            "observation/image": "image",
+            "observation/state": "state",
+            "actions": "actions",
+            "prompt": "task",
+        }
+        if self.use_egomotion_z:
+            repack_structure["ego_motion_z"] = "ego_motion_z"
         repack_transform = _transforms.Group(
             inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/image": "image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "task",
-                    }
-                )
+                *pre_repack,
+                _transforms.RepackTransform(repack_structure),
             ]
         )
         data_transforms = _transforms.Group(
@@ -269,67 +279,6 @@ class TrainConfig:
 
 _CONFIGS = [
     TrainConfig(
-        name="pi0_fast_hannes_low_mem_finetune",
-        model=pi0_fast.Pi0FASTConfig(
-            action_dim=7,
-            action_horizon=10,
-            max_token_len=180,
-            paligemma_variant="gemma_2b_lora",
-        ),
-        data=HannesDataConfig(
-            repo_id="hannes/hannes_demo",
-            assets=AssetsConfig(assets_dir="./assets/pi05_hannes"),
-            base_config=DataConfig(prompt_from_task=False),
-            extra_delta_transform=False,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi0_fast_base/params"
-        ),
-        batch_size=32,
-        num_train_steps=30_000,
-        save_interval=1000,
-        freeze_filter=pi0_fast.Pi0FASTConfig(
-            action_dim=7,
-            action_horizon=10,
-            max_token_len=180,
-            paligemma_variant="gemma_2b_lora",
-        ).get_freeze_filter(),
-        ema_decay=None,
-        wandb_enabled=True,
-    ),
-    TrainConfig(
-        name="pi05_hannes_teleoperation",
-        model=pi0_config.Pi0Config(
-            action_dim=32,
-            action_horizon=10,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            pi05=True,
-            action_quantization_weight=0.1,
-        ),
-        data=HannesDataConfig(
-            repo_id="hannes/teleoperation",
-            assets=AssetsConfig(assets_dir="./assets/pi05_hannes_teleoperation"),
-            base_config=DataConfig(prompt_from_task=False),
-            extra_delta_transform=False,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params"
-        ),
-        batch_size=32,
-        num_train_steps=30_000,
-        save_interval=1000,
-        freeze_filter=pi0_config.Pi0Config(
-            action_dim=32,
-            action_horizon=10,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-            pi05=True,
-        ).get_freeze_filter(),
-        ema_decay=None,
-        wandb_enabled=True,
-    ),
-    TrainConfig(
         name="pi05_hannes_all",
         model=pi0_config.Pi0Config(
             action_dim=32,
@@ -370,17 +319,21 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
             pi05=True,
             action_quantization_weight=0.1,
+            use_egomotion_z=True,
+            egomotion_dim=256,
         ),
         data=HannesDataConfig(
             repo_id="hannes/dataset_new",
             assets=AssetsConfig(assets_dir="./assets/pi05_hannes_dataset_new"),
             base_config=DataConfig(prompt_from_task=False),
             extra_delta_transform=False,
+            use_egomotion_z=True,
+            raw_dir="/mnt/unites2/home/zhx/openpi/dataset_new",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params"
         ),
-        batch_size=32,
+        batch_size=16,
         num_train_steps=30_000,
         save_interval=1000,
         freeze_filter=pi0_config.Pi0Config(

@@ -81,6 +81,10 @@ class LiberoInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        # Pass through EgoMotion z_t if present.
+        if "ego_motion_z" in data:
+            inputs["ego_motion_z"] = data["ego_motion_z"]
+
         return inputs
 
 

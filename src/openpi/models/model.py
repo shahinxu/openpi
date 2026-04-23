@@ -94,6 +94,9 @@ class Observation(Generic[ArrayT]):
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
 
+    # Optional EgoMotion latent feature (z_t) from a 16-frame history encoder.
+    ego_motion_z: at.Float[ArrayT, "*b e"] | None = None
+
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
     # Tokenized prompt mask.
@@ -126,6 +129,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            ego_motion_z=data.get("ego_motion_z"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -205,6 +209,7 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        ego_motion_z=observation.ego_motion_z,
     )
 
 

@@ -67,6 +67,8 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.use_egomotion_z = bool(getattr(config, "use_egomotion_z", False))
+        self.egomotion_dim = int(getattr(config, "egomotion_dim", 256))
         # Optional quantization regularizer on actions; when set to 0.0 this
         # has no effect and the loss is the standard diffusion MSE.
         self.action_quantization_weight = getattr(config, "action_quantization_weight", 0.0)
@@ -101,6 +103,8 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        if self.use_egomotion_z:
+            self.egomotion_proj = nnx.Linear(self.egomotion_dim, action_expert_config.width, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -168,6 +172,10 @@ class Pi0(_model.BaseModel):
             time_emb = nnx.swish(time_emb)
             time_emb = self.time_mlp_out(time_emb)
             time_emb = nnx.swish(time_emb)
+            if self.use_egomotion_z:
+                if obs.ego_motion_z is None:
+                    raise ValueError("Expected obs.ego_motion_z when use_egomotion_z=True")
+                time_emb = time_emb + self.egomotion_proj(obs.ego_motion_z)
             action_expert_tokens = action_tokens
             adarms_cond = time_emb
         else:

@@ -337,6 +337,43 @@ class PadStatesAndActions(DataTransformFn):
         return data
 
 
+@dataclasses.dataclass(frozen=True)
+class EgoMotionZTransform(DataTransformFn):
+    """Loads precomputed EgoMotion z_t vectors and adds them to the data dict.
+
+    Must be applied BEFORE RepackTransform so that ``episode_index`` and
+    ``frame_index`` are still available in the raw LeRobot sample.
+
+    Expects ``{stem}.egomotion_z.npy`` files alongside the HDF5 files in
+    ``raw_dir``.  The mapping from episode_index to file is determined by
+    sorting the HDF5 files alphabetically, which matches the order used by
+    the LeRobot conversion script.
+    """
+
+    raw_dir: str
+
+    def __post_init__(self) -> None:
+        import pathlib
+        raw_dir = pathlib.Path(self.raw_dir).resolve()
+        object.__setattr__(self, "_raw_dir_abs", raw_dir)
+        stems = [p.stem for p in sorted(raw_dir.glob("*.hdf5"))]
+        object.__setattr__(self, "_stems", stems)
+        object.__setattr__(self, "_cache", {})
+
+    def __call__(self, data: DataDict) -> DataDict:
+        ep_idx = int(data["episode_index"])
+        fr_idx = int(data["frame_index"])
+        cache: dict = self._cache  # type: ignore[attr-defined]
+        if ep_idx not in cache:
+            stem = self._stems[ep_idx]  # type: ignore[attr-defined]
+            raw_dir: object = self._raw_dir_abs  # type: ignore[attr-defined]
+            import pathlib
+            npy_path = pathlib.Path(raw_dir) / f"{stem}.egomotion_z.npy"  # type: ignore[arg-type]
+            cache[ep_idx] = np.load(str(npy_path))
+        data["ego_motion_z"] = cache[ep_idx][fr_idx]  # [256]
+        return data
+
+
 def flatten_dict(tree: at.PyTree) -> dict:
     """Flatten a nested dictionary. Uses '/' as the separator."""
     return traverse_util.flatten_dict(tree, sep="/")
