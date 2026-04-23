@@ -372,7 +372,7 @@ _CONFIGS = [
         ),
         data=HannesDataConfig(
             repo_id="hannes/dataset_new",
-            assets=AssetsConfig(assets_dir="./assets/pi05_hannes_all"),
+            assets=AssetsConfig(assets_dir="./assets/pi05_hannes_dataset_new"),
             base_config=DataConfig(prompt_from_task=False),
             extra_delta_transform=False,
         ),
