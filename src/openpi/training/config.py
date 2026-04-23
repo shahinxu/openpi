@@ -81,6 +81,7 @@ class ModelTransformFactory:
                     ],
                 )
             case _model.ModelType.PI0_FAST:
+                assert isinstance(model_config, pi0_fast.Pi0FASTConfig)
                 tokenizer_cls = (
                     _tokenizer.FASTTokenizer
                     if model_config.fast_model_tokenizer is None
@@ -133,8 +134,8 @@ class DataConfigFactory(abc.ABC):
     ) -> dict[str, _transforms.NormStats] | None:
         if asset_id is None:
             return None
+        data_assets_dir = str(assets_dir / asset_id)
         try:
-            data_assets_dir = str(assets_dir / asset_id)
             norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
             logging.info(f"Loaded norm stats from {data_assets_dir}")
             return norm_stats
@@ -202,7 +203,7 @@ class TrainConfig:
     project_name: str = "openpi"
     exp_name: str = tyro.MISSING
     model: _model.BaseModelConfig = dataclasses.field(
-        default_factory=pi0_config.Pi0Config
+        default_factory=pi0_config.Pi0Config  # type: ignore[arg-type]
     )
     weight_loader: weight_loaders.WeightLoader = dataclasses.field(
         default_factory=weight_loaders.NoOpWeightLoader
