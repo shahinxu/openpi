@@ -1,5 +1,7 @@
 import argparse
 import os
+import sys
+from pathlib import Path
 from datetime import datetime
 
 import cv2
@@ -7,8 +9,83 @@ import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import robosuite as suite
+import torch
 
 from openpi_client import websocket_client_policy as _websocket_client_policy
+
+# ─────────────────────────── EgoMotion encoder ──────────────────────────────
+_WORKSPACE_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_WORKSPACE_ROOT / "EgoMotion"))
+
+from src.models.encoder import EncoderConfig, VideoEncoder as _VideoEncoder  # noqa: E402
+from src.data.motion_features import apply_motion_feature as _apply_motion_feature  # noqa: E402
+
+_EGOMOTION_SPAN = 16
+_EGOMOTION_IMAGE_SIZE = 224
+_EGOMOTION_MOTION_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+_EGOMOTION_MOTION_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+_DEFAULT_EGOMOTION_CKPT = str(_WORKSPACE_ROOT / "EgoMotion" / "checkpoints" / "best_encoder_frame_diff.pt")
+_DEFAULT_EGOMOTION_MODE = "frame_diff"
+
+
+def load_egomotion_encoder(ckpt_path: str, device: str = "cpu") -> _VideoEncoder:
+    """Load the VideoEncoder used for ego_motion_z computation."""
+    cfg = EncoderConfig(
+        backbone="resnet18",
+        latent_dim=256,
+        temporal_layers=4,
+        temporal_heads=8,
+        dropout=0.0,
+        pretrained=False,
+        freeze_backbone=False,
+        use_motion_branch=True,
+        aggregate_last_k=4,
+    )
+    encoder = _VideoEncoder(cfg)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    encoder.load_state_dict(ckpt["encoder_state_dict"])
+    encoder = encoder.to(device)
+    encoder.eval()
+    return encoder
+
+
+def _egomotion_preprocess(img_uint8: np.ndarray) -> np.ndarray:
+    """Resize a uint8 HxWx3 image to 224x224 float32 in [0,1]."""
+    resized = cv2.resize(img_uint8, (_EGOMOTION_IMAGE_SIZE, _EGOMOTION_IMAGE_SIZE),
+                         interpolation=cv2.INTER_AREA)
+    return resized.astype(np.float32) / 255.0
+
+
+def _egomotion_build_window(buffer: list) -> np.ndarray:
+    """Build [16, H, W, 3] window from buffer with left-padding."""
+    n = len(buffer)
+    window = np.stack(buffer[-_EGOMOTION_SPAN:], axis=0)  # [min(n,16), H, W, 3]
+    if n < _EGOMOTION_SPAN:
+        pad = np.repeat(window[:1], _EGOMOTION_SPAN - n, axis=0)
+        window = np.concatenate([pad, window], axis=0)
+    return window  # [16, H, W, 3]
+
+
+@torch.no_grad()
+def compute_egomotion_z(
+    encoder: _VideoEncoder,
+    frame_buffer: list,
+    motion_mode: str,
+    device: str,
+) -> np.ndarray:
+    """Compute 256-dim ego_motion_z from rolling frame buffer.
+
+    Args:
+        frame_buffer: list of uint8 HxWx3 frames (up to 16, already resized to 224x224).
+        Returns: [256] float32 numpy array.
+    """
+    window = _egomotion_build_window(frame_buffer)  # [16, 224, 224, 3] float32 [0,1]
+    clip = _apply_motion_feature(window, mode=motion_mode)  # [16, 224, 224, 3]
+    clip = (clip - _EGOMOTION_MOTION_MEAN) / _EGOMOTION_MOTION_STD
+    clip = clip.transpose(0, 3, 1, 2)  # [16, 3, 224, 224]
+    tensor = torch.from_numpy(clip[None]).to(device)  # [1, 16, 3, 224, 224]
+    z = encoder(tensor)  # [1, 256]
+    return z[0].cpu().numpy()  # [256]
 
 
 # ─────────────────────────────────── helpers ────────────────────────────────
@@ -253,6 +330,9 @@ def run_episode(
     image_height=512,
     image_width=512,
     policy_image_size=256,
+    egomotion_encoder=None,
+    egomotion_device="cpu",
+    egomotion_motion_mode=_DEFAULT_EGOMOTION_MODE,
 ):
     obs = env.reset()
 
@@ -311,6 +391,7 @@ def run_episode(
     base_delta_seq = []
     arm_rot_seq = []
     agent_view_seq = []
+    egomotion_frame_buffer = []  # rolling buffer of 224x224 float32 frames for ego_motion_z
 
     obj_z_start = float(obj_pos[2])
     desired_eef_z = float(get_eef_pos(obs, env)[2])
@@ -781,6 +862,12 @@ def run_episode(
         frame = _render_agentview(env, height=image_height, width=image_width)
         agent_view_seq.append(np.asarray(frame, dtype=np.uint8))
 
+        # Update egomotion rolling buffer (224x224 float32)
+        if egomotion_encoder is not None:
+            egomotion_frame_buffer.append(_egomotion_preprocess(frame))
+            if len(egomotion_frame_buffer) > _EGOMOTION_SPAN:
+                egomotion_frame_buffer.pop(0)
+
         # Build policy observation
         compact_state = get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names)
         policy_state = np.zeros((8,), dtype=np.float32)
@@ -791,6 +878,13 @@ def run_episode(
             "observation/image": policy_img,
             "prompt": prompt,
         }
+        if egomotion_encoder is not None and len(egomotion_frame_buffer) >= 1:
+            policy_obs["ego_motion_z"] = compute_egomotion_z(
+                egomotion_encoder,
+                egomotion_frame_buffer,
+                egomotion_motion_mode,
+                egomotion_device,
+            )
         out = policy.infer(policy_obs)
         action = np.asarray(out["actions"], dtype=np.float32)[0, :6].copy()
 
@@ -939,6 +1033,13 @@ def main():
     parser.add_argument("--near-bias-x", type=float, default=0.0)
     parser.add_argument("--near-bias-y", type=float, default=0.03)
     parser.add_argument("--sticky-after-close", action="store_true", default=True)
+    parser.add_argument("--egomotion-ckpt", type=str, default=_DEFAULT_EGOMOTION_CKPT,
+                        help="Path to EgoMotion encoder checkpoint (best_encoder_frame_diff.pt)")
+    parser.add_argument("--egomotion-mode", type=str, default=_DEFAULT_EGOMOTION_MODE,
+                        choices=["frame_diff", "sparse_flow", "abs_frame_diff", "sobel", "none"],
+                        help="Motion feature mode (must match encoder training)")
+    parser.add_argument("--egomotion-device", type=str, default="cpu",
+                        help="Device for egomotion encoder (cpu or cuda:N)")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -946,6 +1047,11 @@ def main():
     plot_dir = os.path.join(args.output_dir, "plots")
     os.makedirs(video_dir, exist_ok=True)
     os.makedirs(plot_dir, exist_ok=True)
+
+    # Load EgoMotion encoder
+    print(f"Loading EgoMotion encoder: {args.egomotion_ckpt}")
+    egomotion_encoder = load_egomotion_encoder(args.egomotion_ckpt, device=args.egomotion_device)
+    print(f"  motion_mode={args.egomotion_mode}  device={args.egomotion_device}")
 
     env_horizon = args.horizon if args.horizon is not None else 5000
 
@@ -1029,6 +1135,9 @@ def main():
             near_bias_x=args.near_bias_x,
             near_bias_y=args.near_bias_y,
             lift_height=args.lift_height,
+            egomotion_encoder=egomotion_encoder,
+            egomotion_device=args.egomotion_device,
+            egomotion_motion_mode=args.egomotion_mode,
         )
 
         print(
