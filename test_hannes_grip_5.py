@@ -301,6 +301,15 @@ def _render_agentview(env, height=512, width=512):
     return frame[::-1]
 
 
+def _render_policy_view(env, camera_name, height=512, width=512):
+    """Render the policy camera with the same orientation used during data collection."""
+    frame = env.sim.render(height=height, width=width, camera_name=camera_name)
+    frame = frame[::-1]
+    if camera_name.endswith("arm_eyeview"):
+        frame = np.rot90(frame, 2)
+    return frame
+
+
 # ──────────────────────────────── run_episode ────────────────────────────────
 
 def run_episode(
@@ -339,6 +348,7 @@ def run_episode(
     base_quat = np.array([0.707, 0.0, 0.0, -0.707], dtype=np.float64)
 
     obj_joint = joints[chosen_obj]
+    policy_camera_name = resolve_camera_name(env, "arm_eyeview") or "agentview"
     hand_site_ids = get_hand_site_ids(env)
     obj_initial = get_object_pos_from_joint(env, obj_joint)
     obj_initial_quat = get_object_quat_from_joint(env, obj_joint)
@@ -859,7 +869,12 @@ def run_episode(
         env.sim.forward()
 
         # Render agentview for policy input
-        frame = _render_agentview(env, height=image_height, width=image_width)
+        frame = _render_policy_view(
+            env,
+            policy_camera_name,
+            height=image_height,
+            width=image_width,
+        )
         agent_view_seq.append(np.asarray(frame, dtype=np.uint8))
 
         # Update egomotion rolling buffer (224x224 float32)
