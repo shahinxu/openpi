@@ -1,13 +1,86 @@
 import argparse
 import os
+import sys
 import time
+from pathlib import Path
 
+import cv2
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import websockets.sync.client
 
 from openpi_client import msgpack_numpy
+
+# ---------------------------------------------------------------------------
+# EgoMotion encoder (optional – only loaded when --egomotion-ckpt is set)
+# ---------------------------------------------------------------------------
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_WORKSPACE_ROOT / "EgoMotion"))
+
+_EGOMOTION_SPAN = 16
+_EGOMOTION_IMAGE_SIZE = 224
+_MOTION_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+_MOTION_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+
+
+def _load_egomotion_encoder(ckpt_path: str, device: torch.device):
+    from src.models.encoder import EncoderConfig, VideoEncoder  # noqa: E402
+
+    cfg = EncoderConfig(
+        backbone="resnet18",
+        latent_dim=256,
+        temporal_layers=4,
+        temporal_heads=8,
+        dropout=0.0,
+        pretrained=False,
+        freeze_backbone=False,
+        use_motion_branch=True,
+        aggregate_last_k=4,
+    )
+    encoder = VideoEncoder(cfg)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    encoder.load_state_dict(ckpt["encoder_state_dict"])
+    encoder.to(device)
+    encoder.eval()
+    return encoder
+
+
+def _precompute_egomotion_z(images_uint8: np.ndarray, encoder, device: torch.device) -> np.ndarray:
+    from src.data.motion_features import apply_motion_feature  # noqa: E402
+
+    T = len(images_uint8)
+    # Resize to 224x224 and normalise to [0, 1]
+    images_01 = np.empty((T, _EGOMOTION_IMAGE_SIZE, _EGOMOTION_IMAGE_SIZE, 3), dtype=np.float32)
+    for i, img in enumerate(images_uint8):
+        resized = cv2.resize(img, (_EGOMOTION_IMAGE_SIZE, _EGOMOTION_IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+        images_01[i] = resized.astype(np.float32) / 255.0
+
+    z_all = np.empty((T, 256), dtype=np.float32)
+    batch_size = 32  # windows per forward pass
+
+    for batch_start in range(0, T, batch_size):
+        batch_end = min(batch_start + batch_size, T)
+        windows = []
+        for t in range(batch_start, batch_end):
+            start_idx = max(0, t - _EGOMOTION_SPAN + 1)
+            window = images_01[start_idx: t + 1]  # [<=16, H, W, 3]
+            missing = _EGOMOTION_SPAN - len(window)
+            if missing > 0:
+                pad = np.repeat(window[:1], missing, axis=0)
+                window = np.concatenate([pad, window], axis=0)
+            # Apply frame_diff motion feature and normalise
+            clip = apply_motion_feature(window, mode="frame_diff")  # [16, H, W, 3] in [0,1]
+            clip = (clip - _MOTION_MEAN) / _MOTION_STD
+            clip = clip.transpose(0, 3, 1, 2).astype(np.float32)  # [16, 3, H, W]
+            windows.append(clip)
+        batch_tensor = torch.from_numpy(np.stack(windows, axis=0)).to(device)
+        with torch.no_grad():
+            z = encoder(batch_tensor)  # [B, 256]
+        z_all[batch_start:batch_end] = z.cpu().numpy()
+
+    return z_all
 
 
 class _SimpleWebsocketClient:
@@ -72,6 +145,10 @@ def load_episode(hdf5_path: str, episode: int = 0):
             wrist = np.asarray(g["sideview_images"], dtype=np.uint8)
         elif "agentview_images" in g:
             image = np.asarray(g["agentview_images"], dtype=np.uint8)
+        elif "agent_view_images" in g:
+            image = np.asarray(g["agent_view_images"], dtype=np.uint8)
+        elif "eye_view_images" in g:
+            image = np.asarray(g["eye_view_images"], dtype=np.uint8)
         else:
             available = list(g.keys())
             raise KeyError(
@@ -143,6 +220,12 @@ def main():
         type=str,
         default="plots/eval_Hold_the_milk_carton_v2.png"
     )
+    parser.add_argument(
+        "--egomotion-ckpt",
+        type=str,
+        default=str(_WORKSPACE_ROOT / "EgoMotion" / "checkpoints" / "best_encoder_frame_diff.pt"),
+        help="Path to EgoMotion encoder checkpoint.  Set to 'none' to disable z_t conditioning.",
+    )
     args = parser.parse_args()
 
     print(f"Loading demo from {args.hdf5}")
@@ -176,6 +259,23 @@ def main():
     )
     print(f"Using prompt: {prompt!r}")
     print(f"Episode length (frames used): {T}")
+
+    # ------------------------------------------------------------------
+    # Precompute EgoMotion z_t for all frames
+    # ------------------------------------------------------------------
+    ego_motion_z_all: np.ndarray | None = None
+    use_egomotion = args.egomotion_ckpt.lower() != "none" and os.path.exists(args.egomotion_ckpt)
+    if use_egomotion:
+        print(f"Loading EgoMotion encoder from {args.egomotion_ckpt} ...")
+        ego_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        ego_encoder = _load_egomotion_encoder(args.egomotion_ckpt, ego_device)
+        print("Precomputing EgoMotion z_t for all frames ...")
+        # image_imgs is [T, H, W, 3] uint8
+        ego_motion_z_all = _precompute_egomotion_z(image_imgs[:T], ego_encoder, ego_device)
+        print(f"z_t shape: {ego_motion_z_all.shape}")
+    else:
+        print("EgoMotion encoder not loaded – skipping z_t conditioning.")
+
     pred_actions = np.zeros((T, 6), dtype=np.float32)
 
     chunk_size = args.chunk_size if args.chunk_size and args.chunk_size > 0 else T
@@ -197,6 +297,8 @@ def main():
             }
             if wrist_imgs is not None:
                 obs["observation/wrist_image"] = wrist_imgs[t]
+            if ego_motion_z_all is not None:
+                obs["ego_motion_z"] = ego_motion_z_all[t]
             out = policy.infer(obs)
             actions_seq = np.asarray(out["actions"], dtype=np.float32)
             pred = actions_seq[0, :6]
