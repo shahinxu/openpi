@@ -465,10 +465,6 @@ def run_episode(
         env.sim.forward()
 
         states.append(get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names))
-        action_log = action.copy()
-        action_log[0] = float(pitch_des)
-        action_log[1] = float(yaw_des)
-        actions.append(action_log)
         base_pos_seq.append(base_pos.copy())
         base_delta_seq.append(base_delta.astype(np.float32))
 
@@ -480,6 +476,10 @@ def run_episode(
             for joint_name, joint_high in finger_close_joint_max.items():
                 set_joint_scalar(env, joint_name, joint_high)
             env.sim.forward()
+
+        next_state_compact = get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names)
+        _g = float(next_state_compact[2])
+        actions.append(np.array([float(next_state_compact[0]), float(next_state_compact[1]), _g, _g, _g, _g], dtype=np.float32))
 
         if capture_images:
             agent = env.sim.render(height=image_height, width=image_width, camera_name="agentview")

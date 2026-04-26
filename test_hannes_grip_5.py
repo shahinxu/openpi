@@ -914,7 +914,9 @@ def run_episode(
         env_action[-6:] = action
         obs, reward, done, _ = env.step(env_action)
 
-        # Re-apply scripted pose after physics step
+        # Re-apply scripted pose after physics step (mirrors collection script exactly).
+        # The JOINT_POSITION controller treats env_action as *deltas*, so pitch and yaw
+        # must be forcibly overridden to their absolute targets — same as collect_hannes_autocruise_grip_5.py.
         apply_scripted_human_pose(
             env,
             base_pos,
@@ -925,6 +927,7 @@ def run_episode(
             arm_rot_des,
         )
         set_joint_scalar(env, pitch_joint_name, float(pitch_initial))
+        set_joint_scalar(env, yaw_joint_name, float(action[1]))  # BUG FIX: was missing, causing yaw drift
         env.sim.forward()
         obs = env._get_observations(force_update=True)
 

@@ -288,7 +288,6 @@ def run_episode(
         raise RuntimeError(f"Cannot read object joint {obj_joint}")
     if obj_initial_quat is None:
         obj_initial_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-    obj_upright_quat = np.array(obj_initial_quat, dtype=np.float64)
 
     # Determine table top Z so the arm never clips below the surface.
     try:
@@ -303,7 +302,7 @@ def run_episode(
     obj_random = obj_initial.copy()
     obj_random[0] = np.clip(obj_initial[0] + rng.uniform(-0.06, 0.06), 0.02, 0.28)
     obj_random[1] = np.clip(obj_initial[1] + rng.uniform(-0.08, 0.08), -0.14, 0.14)
-    set_object_pos(env, obj_joint, obj_random, quat=obj_upright_quat)
+    set_object_pos(env, obj_joint, obj_random, quat=obj_initial_quat)
 
     desired_align_z = max(float(obj_random[2] - 0.035), base_z_floor)
     sampled_base_z = desired_align_z + rng.uniform(-0.08, 0.25)
@@ -327,7 +326,7 @@ def run_episode(
     front_clearance = 0.10
     pregrasp_clearance = 0.060
     grasp_clearance = 0.020
-    target_y_offset = 0.03
+    target_y_offset = 0.037
 
     actions = []
     states = []
@@ -372,7 +371,7 @@ def run_episode(
     arm_ry_baseline = float(arm_rot_initial[1])
     yaw_dir = -front_sign
     yaw_margin = 0.01
-    yaw_target = float((yaw_high - yaw_margin) if yaw_dir > 0 else (yaw_low + yaw_margin))
+    yaw_target = float((np.pi / 2.0 - yaw_margin) if yaw_dir > 0 else (-np.pi / 2.0 + yaw_margin))
     yaw_comp_total_rad = float(np.deg2rad(max(0.0, yaw_comp_total_deg)))
     approach_ry_rotate_rad = float(np.deg2rad(max(0.0, approach_ry_rotate_deg)))
     arm_rot_target = clip_joint_targets(
@@ -395,7 +394,7 @@ def run_episode(
     release_pose_steps = 30
     release_total_steps = 36
     release_open_value = -0.75
-    release_pose_yaw_target = float(np.clip(yaw_initial - np.deg2rad(120.0), yaw_low, yaw_high))
+    release_pose_yaw_target = float(np.pi / 2.0 - yaw_margin)
     release_target_pos = None
     release_arm_rot_start = None
     release_arm_rot_target = clip_joint_targets(arm_rot_initial.copy(), arm_rot_low, arm_rot_high)
@@ -409,6 +408,10 @@ def run_episode(
     grasp_progress = 0
     grasp_lock_progress = 0
     hold_progress = 0
+    post_grip_flip_steps = 60
+    post_grip_flip_progress = 0
+    post_grip_yaw_start = yaw_target
+    post_grip_yaw_end = yaw_target
     release_pose_progress = 0
     release_progress = 0
     sticky_success = 0
@@ -622,10 +625,26 @@ def run_episode(
             action[2:] = hold_close_value
             grasp_lock_progress += 1
             if grasp_lock_progress >= grasp_lock_steps:
-                phase = "release_pose"
-                release_pose_progress = 0
+                phase = "post_grip_flip"
+                post_grip_flip_progress = 0
+                post_grip_yaw_start = yaw_target
+                post_grip_yaw_end = float(np.clip(yaw_target + yaw_dir * (np.pi / 2.0), yaw_low, yaw_high))
                 release_target_pos = base_pos.copy()
                 release_arm_rot_start = arm_rot_hold_des.copy()
+
+        elif phase == "post_grip_flip":
+            if release_target_pos is None:
+                release_target_pos = base_pos.copy()
+            target = release_target_pos.copy()
+            action[0] = 0.0
+            action[1] = 0.0
+            action[2:] = hold_close_value
+            post_grip_flip_progress += 1
+            if post_grip_flip_progress >= post_grip_flip_steps:
+                phase = "release_pose"
+                release_pose_progress = 0
+                yaw_target = post_grip_yaw_end
+                release_pose_yaw_target = post_grip_yaw_end
 
         elif phase == "release_pose":
             if release_target_pos is None:
@@ -657,11 +676,6 @@ def run_episode(
             action[2:] = hold_close_value
             hold_progress += 1
 
-        # Keep can always upright (translation allowed, tipping forbidden)
-        if chosen_obj in ("can", "milk"):
-            obj_now_stable = get_object_pos_from_joint(env, obj_joint)
-            set_object_pos(env, obj_joint, obj_now_stable, quat=obj_upright_quat)
-
         # Sticky contact mechanism: keep object pose relative to palm after close/contact.
         if sticky_after_close:
             palm_pos = get_palm_pos(env)
@@ -671,26 +685,26 @@ def run_episode(
                 obj_now_for_sticky = env.sim.data.qpos[obj_qpos_addr[0]:obj_qpos_addr[0] + 3].copy()
                 if sticky_attached and finger_mean < -0.4:
                     sticky_attached = False
-                if (not sticky_attached) and phase in ("grasp_lock", "release_pose"):
+                if (not sticky_attached) and phase in ("grasp_lock", "post_grip_flip", "release_pose"):
                     near_palm = np.linalg.norm(obj_now_for_sticky - palm_pos) < 0.05
                     if robot_can_contact or near_palm:
                         sticky_offset = obj_now_for_sticky - palm_pos
                         sticky_attached = True
                         sticky_ever_attached = True
                 if sticky_attached:
-                    set_object_pos(env, obj_joint, palm_pos + sticky_offset, quat=obj_upright_quat)
+                    set_object_pos(env, obj_joint, palm_pos + sticky_offset)
 
         # Height lock: compensate wrist-control-induced lifting by lowering base target z when needed.
         # Do not apply during align; align needs a fixed desired_align_z target to converge stably.
         eef_now = get_eef_pos(obs, env)
         z_err = float(eef_now[2] - desired_eef_z)
-        if z_err > 0.0 and phase in ("rotate", "forward", "grasp", "grasp_lock", "release_pose", "release"):
+        if z_err > 0.0 and phase in ("rotate", "forward", "grasp", "grasp_lock", "post_grip_flip", "release_pose", "release"):
             target = target.copy()
             target[2] -= min(0.03, 1.2 * z_err)
 
         # No-lift guard: during/after rotation and grasp, z is not allowed to increase.
         # Keep align phase fully bidirectional in z so it can truly converge to desired_align_z.
-        if phase in ("rotate", "forward", "grasp", "grasp_lock", "release_pose"):
+        if phase in ("rotate", "forward", "grasp", "grasp_lock", "post_grip_flip", "release_pose"):
             target = target.copy()
             target[2] = min(target[2], base_pos[2], desired_align_z)
 
@@ -700,7 +714,7 @@ def run_episode(
             arm_ry_now = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr("robot0_arm_ry")])
             ry_rotated = abs(arm_ry_now - arm_ry_baseline)
             yaw_need = max(0.0, yaw_comp_total_rad - ry_rotated)
-            yaw_target_dynamic = float(np.clip(yaw_initial + yaw_dir * yaw_need, yaw_low + yaw_margin, yaw_high - yaw_margin))
+            yaw_target_dynamic = float(np.clip(yaw_initial + yaw_dir * yaw_need, -np.pi / 2.0 + yaw_margin, np.pi / 2.0 - yaw_margin))
             yaw_target = yaw_target_dynamic
             if front_latched:
                 alpha = rotate_progress / max(1, rotate_total_steps)
@@ -713,6 +727,9 @@ def run_episode(
             yaw_des = (1.0 - release_alpha) * yaw_target + release_alpha * release_pose_yaw_target
         elif phase == "release":
             yaw_des = release_pose_yaw_target
+        elif phase == "post_grip_flip":
+            flip_alpha = min(1.0, post_grip_flip_progress / max(1, post_grip_flip_steps - 1))
+            yaw_des = (1.0 - flip_alpha) * post_grip_yaw_start + flip_alpha * post_grip_yaw_end
         elif phase in ("forward", "grasp", "grasp_lock", "hold"):
             yaw_des = yaw_target
         else:
@@ -727,7 +744,7 @@ def run_episode(
             arm_rot_des = arm_rot_target.copy()
         elif phase == "release":
             arm_rot_des = arm_rot_target.copy()
-        elif phase in ("forward", "grasp", "grasp_lock", "hold"):
+        elif phase in ("forward", "grasp", "grasp_lock", "post_grip_flip", "hold"):
             arm_rot_des = arm_rot_target.copy()
         else:
             # Keep latest arm rotation through align so ry does not get reset.
@@ -770,7 +787,6 @@ def run_episode(
         env.sim.forward()
 
         states.append(get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names))
-        actions.append(action.copy())
         base_pos_seq.append(base_pos.copy())
         base_delta_seq.append(base_delta.astype(np.float32))
         arm_rot_seq.append(arm_rot_des.astype(np.float32))
@@ -791,6 +807,9 @@ def run_episode(
         set_joint_scalar(env, yaw_joint_name, float(yaw_des))
         env.sim.forward()
         obs = env._get_observations(force_update=True)
+        next_state_compact = get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names)
+        _g = float(next_state_compact[2])
+        actions.append(np.array([float(next_state_compact[0]), float(next_state_compact[1]), _g, _g, _g, _g], dtype=np.float32))
         rewards.append(float(reward))
         dones.append(bool(done))
 

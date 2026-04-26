@@ -338,7 +338,7 @@ def run_episode(
     pitch_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(pitch_joint_name)])
     yaw_dir = -front_sign
     yaw_margin = 0.01
-    yaw_target = float((yaw_high - yaw_margin) if yaw_dir > 0 else (yaw_low + yaw_margin))
+    yaw_target = float((np.pi / 2.0 - yaw_margin) if yaw_dir > 0 else (-np.pi / 2.0 + yaw_margin))
     rotate_total_steps = 60
     forward_push_steps = 16
     forward_push_distance = 0.084
@@ -406,14 +406,13 @@ def run_episode(
             env.sim.forward()
 
             states.append(get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names))
-            action_log = action.copy()
-            action_log[0] = float(pitch_initial)
-            action_log[1] = float(yaw_initial)
-            actions.append(action_log)
             base_pos_seq.append(base_pos.copy())
             base_delta_seq.append(base_delta.astype(np.float32))
 
             obs, reward, done, _ = env.step(action)
+            next_state_compact = get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names)
+            _g = float(next_state_compact[2])
+            actions.append(np.array([float(next_state_compact[0]), float(next_state_compact[1]), _g, _g, _g, _g], dtype=np.float32))
             rewards.append(float(reward))
             dones.append(bool(done))
 
@@ -707,14 +706,13 @@ def run_episode(
         env.sim.forward()
 
         states.append(get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names))
-        action_log = action.copy()
-        action_log[0] = float(pitch_initial)
-        action_log[1] = float(yaw_des)
-        actions.append(action_log)
         base_pos_seq.append(base_pos.copy())
         base_delta_seq.append(base_delta.astype(np.float32))
 
         obs, reward, done, _ = env.step(action)
+        next_state_compact = get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names)
+        _g = float(next_state_compact[2])
+        actions.append(np.array([float(next_state_compact[0]), float(next_state_compact[1]), _g, _g, _g, _g], dtype=np.float32))
         rewards.append(float(reward))
         dones.append(bool(done))
 

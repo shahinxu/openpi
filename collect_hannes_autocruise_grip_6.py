@@ -406,7 +406,7 @@ def run_episode(
     arm_ry_baseline = float(arm_rot_initial[1])
     yaw_dir = -front_sign
     yaw_margin = 0.01
-    yaw_target = float((yaw_high - yaw_margin) if yaw_dir > 0 else (yaw_low + yaw_margin))
+    yaw_target = float((np.pi / 2.0 - yaw_margin) if yaw_dir > 0 else (-np.pi / 2.0 + yaw_margin))
     yaw_comp_total_rad = float(np.deg2rad(max(0.0, yaw_comp_total_deg)))
     approach_ry_rotate_rad = float(np.deg2rad(max(0.0, approach_ry_rotate_deg)))
     arm_rot_target = clip_joint_targets(
@@ -807,7 +807,7 @@ def run_episode(
             arm_ry_now = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr("robot0_arm_ry")])
             ry_rotated = abs(arm_ry_now - arm_ry_baseline)
             yaw_need = max(0.0, yaw_comp_total_rad - ry_rotated)
-            yaw_target_dynamic = float(np.clip(yaw_initial + yaw_dir * yaw_need, yaw_low + yaw_margin, yaw_high - yaw_margin))
+            yaw_target_dynamic = float(np.clip(yaw_initial + yaw_dir * yaw_need, -np.pi / 2.0 + yaw_margin, np.pi / 2.0 - yaw_margin))
             yaw_target = yaw_target_dynamic
             if front_latched:
                 alpha = rotate_progress / max(1, rotate_total_steps)
@@ -868,7 +868,6 @@ def run_episode(
         env.sim.forward()
 
         states.append(get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names))
-        actions.append(action.copy())
         base_pos_seq.append(base_pos.copy())
         base_delta_seq.append(base_delta.astype(np.float32))
         arm_rot_seq.append(arm_rot_des.astype(np.float32))
@@ -889,6 +888,9 @@ def run_episode(
         set_joint_scalar(env, yaw_joint_name, float(yaw_des))
         env.sim.forward()
         obs = env._get_observations(force_update=True)
+        next_state_compact = get_compact_state(env, pitch_joint_name, yaw_joint_name, finger_joint_names)
+        _g = float(next_state_compact[2])
+        actions.append(np.array([float(next_state_compact[0]), float(next_state_compact[1]), _g, _g, _g, _g], dtype=np.float32))
         rewards.append(float(reward))
         dones.append(bool(done))
 

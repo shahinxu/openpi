@@ -226,6 +226,12 @@ def main():
         default=str(_WORKSPACE_ROOT / "EgoMotion" / "checkpoints" / "best_encoder_frame_diff.pt"),
         help="Path to EgoMotion encoder checkpoint.  Set to 'none' to disable z_t conditioning.",
     )
+    parser.add_argument(
+        "--egomotion-npy",
+        type=str,
+        default=None,
+        help="Path to pre-computed egomotion z .npy file [T, 256]. Skips encoder.",
+    )
     args = parser.parse_args()
 
     print(f"Loading demo from {args.hdf5}")
@@ -264,17 +270,21 @@ def main():
     # Precompute EgoMotion z_t for all frames
     # ------------------------------------------------------------------
     ego_motion_z_all: np.ndarray | None = None
-    use_egomotion = args.egomotion_ckpt.lower() != "none" and os.path.exists(args.egomotion_ckpt)
-    if use_egomotion:
-        print(f"Loading EgoMotion encoder from {args.egomotion_ckpt} ...")
-        ego_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ego_encoder = _load_egomotion_encoder(args.egomotion_ckpt, ego_device)
-        print("Precomputing EgoMotion z_t for all frames ...")
-        # image_imgs is [T, H, W, 3] uint8
-        ego_motion_z_all = _precompute_egomotion_z(image_imgs[:T], ego_encoder, ego_device)
-        print(f"z_t shape: {ego_motion_z_all.shape}")
+    if args.egomotion_npy is not None and os.path.exists(args.egomotion_npy):
+        print(f"Loading pre-computed egomotion z from {args.egomotion_npy} ...")
+        ego_motion_z_all = np.load(args.egomotion_npy)[:T].astype(np.float32)
+        print(f"z_t shape (from npy): {ego_motion_z_all.shape}")
     else:
-        print("EgoMotion encoder not loaded – skipping z_t conditioning.")
+        use_egomotion = args.egomotion_ckpt.lower() != "none" and os.path.exists(args.egomotion_ckpt)
+        if use_egomotion:
+            print(f"Loading EgoMotion encoder from {args.egomotion_ckpt} ...")
+            ego_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            ego_encoder = _load_egomotion_encoder(args.egomotion_ckpt, ego_device)
+            print("Precomputing EgoMotion z_t for all frames ...")
+            ego_motion_z_all = _precompute_egomotion_z(image_imgs[:T], ego_encoder, ego_device)
+            print(f"z_t shape: {ego_motion_z_all.shape}")
+        else:
+            print("EgoMotion encoder not loaded – skipping z_t conditioning.")
 
     pred_actions = np.zeros((T, 6), dtype=np.float32)
 
