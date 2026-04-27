@@ -15,7 +15,7 @@ import torch
 # ---------------------------------------------------------------------------
 # Resolve workspace root so that ``EgoMotion`` is importable.
 # ---------------------------------------------------------------------------
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]  # -> openpi/
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]  # -> openpi/
 sys.path.insert(0, str(WORKSPACE_ROOT / "EgoMotion"))
 
 from src.models.encoder import EncoderConfig, VideoEncoder  # noqa: E402
@@ -214,8 +214,14 @@ def main() -> None:
     parser.add_argument(
         "--dirs",
         nargs="+",
-        default=DEFAULT_DIRS,
+        default=None,
         help="Dataset directories containing .hdf5 files",
+    )
+    parser.add_argument(
+        "--files",
+        nargs="+",
+        default=None,
+        help="Explicit list of .hdf5 files to process (overrides --dirs)",
     )
     parser.add_argument(
         "--encoder-ckpt",
@@ -241,17 +247,21 @@ def main() -> None:
 
     # Collect all HDF5 files
     hdf5_files: list[str] = []
-    for d in args.dirs:
-        found = sorted(glob.glob(os.path.join(d, "*.hdf5")))
-        if not found:
-            print(f"WARNING: no .hdf5 files found in {d}")
-        hdf5_files.extend(found)
+    if args.files:
+        hdf5_files = list(args.files)
+    else:
+        dirs = args.dirs if args.dirs else DEFAULT_DIRS
+        for d in dirs:
+            found = sorted(glob.glob(os.path.join(d, "*.hdf5")))
+            if not found:
+                print(f"WARNING: no .hdf5 files found in {d}")
+            hdf5_files.extend(found)
 
     if not hdf5_files:
         print("No HDF5 files to process.")
         return
 
-    print(f"Found {len(hdf5_files)} HDF5 files across {len(args.dirs)} directories.")
+    print(f"Found {len(hdf5_files)} HDF5 files across {len(args.files) if args.files else len(args.dirs or [])} source(s).")
     print(f"Encoder checkpoint: {args.encoder_ckpt}")
     print(f"Device: {args.device}  |  Batch size: {args.batch_size}")
     print(f"Motion mode: {args.motion_mode}")

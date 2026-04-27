@@ -354,7 +354,8 @@ def run_episode(
             finger_joint_names.append(joint_name)
     yaw_joint_id = env.sim.model.joint_name2id(yaw_joint_name)
     yaw_low, yaw_high = env.sim.model.jnt_range[yaw_joint_id]
-    yaw_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(yaw_joint_name)])
+    yaw_initial = -np.pi/2
+    set_joint_scalar(env, yaw_joint_name, yaw_initial)
     pitch_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(pitch_joint_name)])
     arm_slide_joint_names = ["robot0_arm_tx", "robot0_arm_ty", "robot0_arm_tz"]
     arm_slide_initial = np.array(
@@ -817,8 +818,9 @@ def run_episode(
         if phase == "rotate":
             arm_ry_now = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr("robot0_arm_ry")])
             ry_rotated = abs(arm_ry_now - arm_ry_baseline)
-            yaw_need = max(0.0, yaw_comp_total_rad - ry_rotated)
-            yaw_target_dynamic = float(np.clip(yaw_initial + yaw_dir * yaw_need, -np.pi / 2.0 + yaw_margin, np.pi / 2.0 - yaw_margin))
+            # Wrist retreats back toward neutral (0) by the same amount arm has tilted.
+            # yaw_initial = -π/2, so retreating means adding ry_rotated (positive direction).
+            yaw_target_dynamic = float(np.clip(yaw_initial + ry_rotated, yaw_low + yaw_margin, yaw_high - yaw_margin))
             yaw_target = yaw_target_dynamic
             if front_latched:
                 alpha = rotate_progress / max(1, rotate_total_steps)

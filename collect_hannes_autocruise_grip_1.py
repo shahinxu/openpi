@@ -325,7 +325,8 @@ def run_episode(
             finger_joint_names.append(joint_name)
     yaw_joint_id = env.sim.model.joint_name2id(yaw_joint_name)
     yaw_low, yaw_high = env.sim.model.jnt_range[yaw_joint_id]
-    yaw_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(yaw_joint_name)])
+    yaw_initial = -np.pi/2
+    set_joint_scalar(env, yaw_joint_name, yaw_initial)
     pitch_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(pitch_joint_name)])
     arm_slide_joint_names = ["robot0_arm_tx", "robot0_arm_ty", "robot0_arm_tz"]
     arm_slide_initial = np.array(

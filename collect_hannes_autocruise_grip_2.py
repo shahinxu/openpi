@@ -294,7 +294,8 @@ def run_episode(
     yaw_low, yaw_high = env.sim.model.jnt_range[yaw_joint_id]
     pitch_joint_id = env.sim.model.joint_name2id(pitch_joint_name)
     pitch_low, pitch_high = env.sim.model.jnt_range[pitch_joint_id]
-    yaw_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(yaw_joint_name)])
+    yaw_initial = -np.pi/2
+    set_joint_scalar(env, yaw_joint_name, yaw_initial)
     pitch_initial = float(env.sim.data.qpos[env.sim.model.get_joint_qpos_addr(pitch_joint_name)])
     yaw_target = yaw_initial
     # For this setup, increasing pitch corresponds to pressing wrist downward.

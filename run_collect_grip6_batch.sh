@@ -6,7 +6,7 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-/home/zhx/miniconda3/envs/openpi311/bin/python}"
-OUTDIR="dataset_auto_grip_6"
+OUTDIR="${OUTDIR:-dataset_auto_grip_6_rerun}"
 mkdir -p "$OUTDIR"
 
 EPISODES_PER_TARGET="${1:-50}"

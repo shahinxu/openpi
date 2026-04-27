@@ -3,7 +3,7 @@
 # Each episode is saved to its own file. Failed episodes are retried.
 # Usage: bash run_collect_grip5_batch.sh [episodes_per_combo]
 
-OUTDIR="dataset_auto_grip_5"
+OUTDIR="${OUTDIR:-dataset_auto_grip_5_rerun}"
 mkdir -p "$OUTDIR"
 
 EPISODES_PER_COMBO="${1:-5}"
